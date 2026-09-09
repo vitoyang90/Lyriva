@@ -1,0 +1,12 @@
+services:
+  lyrics:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      SP_DC: ${SP_DC:?Set SP_DC in backend/.env}
+      LYRICS_API_KEY: ${LYRICS_API_KEY:?Set LYRICS_API_KEY in backend/.env}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
