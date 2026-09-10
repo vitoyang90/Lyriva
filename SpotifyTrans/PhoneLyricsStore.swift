@@ -7,7 +7,14 @@ final class PhoneLyricsStore: ObservableObject {
     @Published private(set) var readings: [Int: String] = [:]
     @Published private(set) var loading = false
     @Published private(set) var message = "連接 Spotify 並播放歌曲，即可讀取歌詞。"
-    @Published private(set) var conversionMilliseconds: Int?
+    private struct Request: Equatable {
+        let trackID: String?
+        let language: LyricsLanguage
+        let revision: Int
+        let loginRevision: Int
+    }
+    private(set) var displayedTrackID: String?
+    private var completedRequest: Request?
     private var generation = UUID()
     private let fetch: @Sendable (String) async throws -> LyricsDocument
     private let convert: @Sendable (LyricsDocument, LyricsLanguage) async -> [Int: String]
@@ -15,8 +22,9 @@ final class PhoneLyricsStore: ObservableObject {
          convert: @escaping @Sendable (LyricsDocument, LyricsLanguage) async -> [Int: String] = { document, language in
              await Task.detached(priority: .userInitiated) {
                  let engine = LyricsRomanizer()
-                 return Dictionary(uniqueKeysWithValues: document.lines.compactMap { line in
-                     guard let reading = engine.convert(line.words, language: language).first?.romanization else { return nil }
+                 let converted = engine.convert(document.lines.map(\.words), language: language)
+                 return Dictionary(uniqueKeysWithValues: zip(document.lines, converted).compactMap { line, result in
+                     guard let reading = result.romanization else { return nil }
                      return (line.id, reading)
                  })
              }.value
@@ -25,28 +33,34 @@ final class PhoneLyricsStore: ObservableObject {
         self.convert = convert
     }
 
-    func load(trackID: String?, language: LyricsLanguage) async {
+    func load(trackID: String?, language: LyricsLanguage, revision: Int = 0, loginRevision: Int = 0) async {
+        guard !Task.isCancelled else { return }
+        let request = Request(trackID: trackID, language: language, revision: revision, loginRevision: loginRevision)
+        // Reappearing views and repeated playback updates must not reload the displayed song.
+        // Only the current document is retained; changing tracks discards it.
+        guard request != completedRequest else { return }
+        completedRequest = nil
         let requestID = UUID()
         generation = requestID
-        document = nil
-        readings = [:]
-        conversionMilliseconds = nil
-        loading = false
+        if trackID == nil || trackID != displayedTrackID {
+            document = nil
+            readings = [:]
+            displayedTrackID = nil
+        }
+        loading = trackID != nil
         guard let trackID else { message = "請先連接 Spotify 並播放歌曲。"; return }
-        loading = true
         message = "正在取得歌詞…"
         defer { if generation == requestID { loading = false } }
         do {
             let lyrics = try await fetch(trackID)
             guard generation == requestID, !Task.isCancelled else { return }
             message = "正在裝置上產生羅馬字…"
-            let start = Date()
             let result = await convert(lyrics, language)
             guard generation == requestID, !Task.isCancelled else { return }
-            conversionMilliseconds = Int(Date().timeIntervalSince(start) * 1000)
-            guard generation == requestID, !Task.isCancelled else { return }
             document = lyrics
+            displayedTrackID = trackID
             readings = result
+            completedRequest = request
             message = "已直接從 Spotify 取得歌詞。"
             if !lyrics.isSynced { message += "這首歌沒有有效時間標記，使用一般閱讀模式。" }
         } catch {

@@ -2,8 +2,8 @@ import SwiftUI
 
 struct SpotifyConnectionView: View {
     @ObservedObject var spotify: SpotifyConnection
+    @ObservedObject var starter: SpotifyPlaybackStarter
     var openSettings: () -> Void
-    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -14,7 +14,10 @@ struct SpotifyConnectionView: View {
                         .font(.system(size: 10, weight: .bold, design: .monospaced)).tracking(1)
                 }.foregroundStyle(Studio.muted)
                 Spacer()
-                if spotify.busy { ProgressView().tint(Studio.accent).scaleEffect(0.8) }
+                ProgressView().tint(Studio.accent).scaleEffect(0.8)
+                    .frame(width: 20, height: 20)
+                    .opacity((spotify.showingActivity || starter.isStarting) ? 1 : 0)
+                    .accessibilityHidden(!spotify.showingActivity && !starter.isStarting)
             }
             HStack(alignment: .center, spacing: 20) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -73,8 +76,13 @@ struct SpotifyConnectionView: View {
                     Spacer(minLength: 0)
                 }
                 .buttonStyle(.plain).foregroundStyle(Studio.ink)
-                .disabled(spotify.busy).opacity(spotify.busy ? 0.55 : 1)
-                Text(spotify.status).font(.caption).foregroundStyle(Studio.muted)
+                .disabled(spotify.busy || starter.isStarting).opacity((spotify.showingActivity || starter.isStarting) ? 0.55 : 1)
+                Text(starter.message ?? spotify.status).font(.caption).foregroundStyle(Studio.muted)
+                    .lineLimit(2, reservesSpace: true)
+                if spotify.track == nil {
+                    Text("按播放以開啟 Spotify，接續上次播放後返回這裡。")
+                        .font(.caption).foregroundStyle(Studio.muted)
+                }
                 if let url = spotify.track?.external_urls.spotify {
                     Link(destination: url) {
                         Label("在 Spotify 開啟", systemImage: "arrow.up.right").font(.caption.weight(.medium))

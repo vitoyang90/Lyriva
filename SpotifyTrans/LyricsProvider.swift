@@ -1,5 +1,4 @@
 import Foundation
-import SwiftUI
 
 struct LyricsDocument: Sendable {
     struct Line: Identifiable, Sendable {

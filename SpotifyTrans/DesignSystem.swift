@@ -112,7 +112,7 @@ struct LanguageMenu: View {
     var body: some View {
         Menu {
             Picker("歌詞語言", selection: $language) {
-                ForEach(LyricsLanguage.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(LyricsLanguage.allCases) { Text($0 == .japanese ? "日文（含漢字讀音）" : $0.rawValue).tag($0) }
             }
         } label: { StudioPill(title: language.rawValue, symbol: "character.bubble") }
         .accessibilityLabel("歌詞語言：\(language.rawValue)")

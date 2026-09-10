@@ -18,37 +18,84 @@ enum LyricsLanguage: String, CaseIterable, Identifiable, Sendable {
 
 struct LyricsRomanizer {
     func convert(_ lyrics: String, language: LyricsLanguage) -> [RomanizedLine] {
-        lyrics.components(separatedBy: .newlines).enumerated().map { index, line in
-            RomanizedLine(id: index, original: line, romanization: romanize(line, language: language))
+        convert(lyrics.components(separatedBy: .newlines), language: language)
+    }
+
+    func convert(_ lines: [String], language: LyricsLanguage) -> [RomanizedLine] {
+        // Lyrics often place a lone kanji word on its own line. Retain the song's kana
+        // evidence while deciding each run separately, so English cannot mask Japanese.
+        let japaneseContext = language == .automatic && lines.contains(where: containsKana)
+        return lines.enumerated().map { index, line in
+            RomanizedLine(id: index, original: line,
+                          romanization: romanize(line, language: language, japaneseContext: japaneseContext))
         }
     }
 
-    private func romanize(_ text: String, language: LyricsLanguage) -> String? {
+    // Script boundaries are reliable even when the sentence's dominant language is English.
+    private static let eastAsianRuns = try! NSRegularExpression(
+        pattern: #"[\p{Han}\p{Hiragana}\p{Katakana}ー々〆\u3099\u309A]+"#)
+    private static let kana = try! NSRegularExpression(pattern: #"[\p{Hiragana}\p{Katakana}ー]"#)
+
+    private func containsKana(_ text: String) -> Bool {
+        Self.kana.firstMatch(in: text, range: NSRange(location: 0, length: (text as NSString).length)) != nil
+    }
+
+    private func romanize(_ text: String, language: LyricsLanguage, japaneseContext: Bool) -> String? {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        // Keep English and other Latin-only text intact, including manual Japanese mode.
-        let requiresTransliteration = text.unicodeScalars.contains {
-            CharacterSet.letters.contains($0) && $0.value > 0x024F
-        }
-        guard requiresTransliteration else { return nil }
-        // A document-wide language guess would incorrectly convert Chinese lines in mixed lyrics.
-        var isJapanese = language == .japanese
-        if language == .automatic {
-            let recognizer = NLLanguageRecognizer()
-            recognizer.processString(text)
-            let detected = recognizer.dominantLanguage
-            isJapanese = detected == .japanese
-            if detected == .english || detected == .simplifiedChinese || detected == .traditionalChinese {
-                return nil
+        let source = text as NSString
+        let matches = Self.eastAsianRuns.matches(in: text, range: NSRange(location: 0, length: source.length))
+        var output = ""
+        var end = 0
+        var changed = false
+        var previousWasConverted = false
+
+        func append(_ original: String, converted: String) {
+            guard !original.isEmpty else { return }
+            let wasConverted = original != converted
+            // Unspaced script boundaries (helloカタカナworld) need readable word breaks.
+            // Existing spaces and punctuation remain exactly as supplied in the lyrics.
+            if (wasConverted || previousWasConverted),
+               let last = output.last, let first = converted.first,
+               (last.isLetter || last.isNumber), (first.isLetter || first.isNumber) {
+                output += " "
             }
+            output += converted
+            changed = changed || wasConverted
+            previousWasConverted = wasConverted
         }
-        if isJapanese { return japaneseReading(text) }
-        guard let latin = text.applyingTransform(.toLatin, reverse: false),
-              latin != text else { return nil }
-        return latin
+
+        for match in matches {
+            let gap = source.substring(with: NSRange(location: end, length: match.range.location - end))
+            // English stays untouched by toLatin; Hangul and other non-Latin scripts still convert.
+            append(gap, converted: gap.applyingTransform(.toLatin, reverse: false) ?? gap)
+            let part = source.substring(with: match.range)
+            let hasKana = containsKana(part)
+            var isJapanese = hasKana || language == .japanese
+            if !isJapanese && language == .automatic {
+                // Kana elsewhere in the song makes a Japanese reading more likely for
+                // shared words like 世界 / 未来. A hint is not a forced language: preserve
+                // a run when the combined Chinese probability still outweighs Japanese.
+                let recognizer = NLLanguageRecognizer()
+                if japaneseContext {
+                    recognizer.languageHints = [.japanese: 0.8, .traditionalChinese: 0.1, .simplifiedChinese: 0.1]
+                }
+                recognizer.processString(part)
+                if japaneseContext {
+                    isJapanese = (recognizer.languageHypotheses(withMaximum: 3)[.japanese] ?? 0) > 0.5
+                } else {
+                    isJapanese = recognizer.dominantLanguage == .japanese
+                }
+            }
+            append(part, converted: isJapanese ? (japaneseReading(part) ?? part) : part)
+            end = match.range.location + match.range.length
+        }
+        let tail = source.substring(from: end)
+        append(tail, converted: tail.applyingTransform(.toLatin, reverse: false) ?? tail)
+        return changed ? output : nil
     }
 
     private func japaneseReading(_ text: String) -> String? {
-        let source = text as NSString
+        let source = text.precomposedStringWithCanonicalMapping as NSString
         let tokenizer = CFStringTokenizerCreate(nil, source,
             CFRange(location: 0, length: source.length), kCFStringTokenizerUnitWord,
             NSLocale(localeIdentifier: "ja"))
@@ -64,7 +111,8 @@ struct LyricsRomanizer {
             let original = source.substring(with: NSRange(location: range.location, length: range.length))
             let reading = CFStringTokenizerCopyCurrentTokenAttribute(tokenizer,
                 kCFStringTokenizerAttributeLatinTranscription) as? String
-            output += reading ?? original
+            // Unknown names/characters can have an empty transcription. Never drop them.
+            output += reading.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? original
             end = range.location + range.length
         }
         if end < source.length { output += source.substring(from: end) }

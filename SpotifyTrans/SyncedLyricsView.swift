@@ -52,10 +52,11 @@ struct SyncedLyricsView: View {
                         } label: { StudioPill(title: "Aa") }.accessibilityLabel("歌詞字級")
                     }.buttonStyle(.plain)
                 }.scrollIndicators(.hidden)
-                if !document.isSynced {
-                    Text("此歌曲沒有時間標記，可以自由閱讀。")
-                        .font(.caption).foregroundStyle(Studio.muted)
-                }
+                HStack(spacing: 8) {
+                    if store.loading { ProgressView().tint(Studio.accent).scaleEffect(0.7) }
+                    Text(store.message)
+                        .font(.caption).foregroundStyle(Studio.muted).lineLimit(1)
+                }.frame(height: 20, alignment: .leading)
                 TimelineView(.animation(minimumInterval: 0.25, paused: scenePhase != .active)) { context in
                     let active = spotify.playbackPosition(at: context.date).flatMap { document.activeLine(at: $0) }
                     ScrollViewReader { proxy in
@@ -103,7 +104,7 @@ struct SyncedLyricsView: View {
             }
         }
         .task(id: LoadID(track: spotify.track?.id, language: language, revision: revision, login: loginRevision)) {
-            await store.load(trackID: spotify.track?.id, language: language)
+            await store.load(trackID: spotify.track?.id, language: language, revision: revision, loginRevision: loginRevision)
         }
     }
 }

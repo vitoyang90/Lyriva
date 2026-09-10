@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var spotify = SpotifyConnection()
     @StateObject private var phoneLyrics = PhoneLyricsStore()
+    @StateObject private var widgetPublisher = WidgetSnapshotPublisher()
     @State private var settingsShown = false
     @State private var loginRevision = 0
     @Environment(\.scenePhase) private var scenePhase
@@ -28,9 +29,12 @@ struct ContentView: View {
                     Text("每一種語言，都有你的聲音。")
                         .font(.subheadline).foregroundStyle(Studio.muted)
                 }.padding(.top, 4)
-                SpotifyConnectionView(spotify: spotify) { settingsShown = true }
+                SpotifyConnectionView(spotify: spotify, starter: spotify.playbackStarter) { settingsShown = true }
                 SyncedLyricsView(spotify: spotify, store: phoneLyrics, loginRevision: loginRevision) {
                     settingsShown = true
+                }
+                if let error = widgetPublisher.error {
+                    Text(error).font(.caption).foregroundStyle(Studio.muted)
                 }
                 HStack(spacing: 6) {
                     Image(systemName: "iphone")
@@ -50,10 +54,33 @@ struct ContentView: View {
             ConnectionSettingsView(spotify: spotify) { loginRevision += 1 }
                 .presentationDragIndicator(.visible)
         }
+        .onOpenURL { url in
+            if url.scheme == "spotifytrans", url.host == "lyrics" {
+                settingsShown = false
+                return
+            }
+            if spotify.playbackStarter.handleCallback(url) {
+                Task { await spotify.refresh(showActivity: false) }
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            spotify.playbackStarter.sceneChanged(phase)
+            if phase != .active { widgetPublisher.update(spotify: spotify, lyrics: phoneLyrics, force: true) }
+        }
+        .onChange(of: spotify.connected) { _, connected in
+            if !connected { widgetPublisher.clear() }
+        }
+        .task(id: scenePhase == .active) {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                widgetPublisher.update(spotify: spotify, lyrics: phoneLyrics)
+                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+            }
+        }
         .task(id: "\(spotify.connected)-\(scenePhase == .active)") {
             guard spotify.connected, scenePhase == .active else { return }
             while !Task.isCancelled {
-                await spotify.refresh()
+                await spotify.refresh(showActivity: false)
                 do { try await Task.sleep(for: .seconds(5)) }
                 catch { return }
             }

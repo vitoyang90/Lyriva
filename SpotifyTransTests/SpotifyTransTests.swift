@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import Testing
 @testable import SpotifyTrans
@@ -51,6 +52,79 @@ struct SpotifyTransTests {
         #expect(engine.convert("Hello world", language: .japanese)[0].romanization == nil)
     }
 
+    @Test func mixedLanguageLinesKeepEnglishAndConvertJapanese() {
+        let cases = [
+            ("I just want to stay with you forever ありがとう", "I just want to stay with you forever arigatou"),
+            ("Don't stop, 明日も一緒に歌おう!", "Don't stop, asu mo issho ni utaou!"),
+            ("helloカタカナworld", "hello katakana world"),
+            ("君と Dream 一緒に", "kimi to Dream issho ni"),
+            ("Hello 안녕하세요 WORLD", "Hello annyeonghaseyo WORLD"),
+            ("ありがとう 一起唱歌", "arigatou 一起唱歌"),
+            ("Hello ｶﾀｶﾅ WORLD", "Hello katakana WORLD"),
+            ("Hello か\u{3099} WORLD", "Hello ga WORLD"),
+            ("🎵 Don't  ありがとう, WORLD!", "🎵 Don't  arigatou, WORLD!")
+        ]
+        let engine = LyricsRomanizer()
+        for (original, expected) in cases {
+            #expect(engine.convert(original, language: .automatic)[0].romanization == expected)
+        }
+        #expect(engine.convert("Don't stop, 明日も一緒に歌おう!", language: .japanese)[0].romanization == "Don't stop, asu mo issho ni utaou!")
+        #expect(engine.convert("一起唱歌 Hello", language: .automatic)[0].romanization == nil)
+    }
+
+    @Test func japaneseSongContextReadsKanjiOnlyWordsWithoutChangingChineseSentences() {
+        let engine = LyricsRomanizer()
+        let lines = engine.convert(["君と歌う", "世界", "未来", "夢", "Hello 世界", "一起唱歌", "我愛你", ""], language: .automatic)
+        #expect(lines.map(\.romanization) == ["kimi to utau", "sekai", "mirai", "yume", "Hello sekai", nil, nil, nil])
+        #expect(engine.convert("世界、君と", language: .automatic)[0].romanization == "sekai、kimi to")
+        // Shared kanji alone are not sufficient evidence to romanize Chinese lyrics.
+        #expect(engine.convert("Hello\n世界\n未来\n我愛你", language: .automatic).allSatisfy { $0.romanization == nil })
+    }
+
+    @Test func manualJapaneseReadsAmbiguousKanjiAndKeepsUnknownCharacters() {
+        let engine = LyricsRomanizer()
+        let lines = engine.convert("世界\n未来\n夢\nHello 希望\nHello 𠮷 WORLD", language: .japanese)
+        #expect(lines.map(\.romanization) == ["sekai", "mirai", "yume", "Hello kibou", nil])
+        #expect(lines.last?.original == "Hello 𠮷 WORLD")
+        // The tokenizer reports an empty transcription for this unfamiliar character.
+        #expect(engine.convert("我愛你", language: .japanese)[0].romanization?.contains("你") == true)
+    }
+
+    @MainActor @Test func songContextReachesKanjiLyricsWithOriginalLineIDs() async {
+        let store = PhoneLyricsStore(fetch: { _ in
+            LyricsDocument(lines: [
+                .init(id: 12, words: "君と歌う", startTimeMS: 1000),
+                .init(id: 24, words: "世界", startTimeMS: 2000),
+                .init(id: 36, words: "Hello 未来", startTimeMS: 3000),
+                .init(id: 48, words: "一起唱歌", startTimeMS: 4000),
+                .init(id: 60, words: "", startTimeMS: 5000)
+            ], isSynced: true)
+        })
+        await store.load(trackID: Self.trackID, language: .automatic)
+        #expect(store.readings[24] == "sekai")
+        #expect(store.readings[36] == "Hello mirai")
+        #expect(store.readings[48] == nil)
+        #expect(store.readings[60] == nil)
+        #expect(store.document?.lines.map(\.id) == [12, 24, 36, 48, 60])
+        #expect(store.document?.activeLine(at: 2000) == 24)
+    }
+
+    @MainActor @Test func mixedSongReachesDisplayedReadingsWithoutTranslatingEnglishLines() async {
+        let store = PhoneLyricsStore(fetch: { _ in
+            LyricsDocument(lines: [
+                .init(id: 12, words: "I just want to stay with you forever ありがとう", startTimeMS: 1000),
+                .init(id: 24, words: "English ONLY", startTimeMS: 2000),
+                .init(id: 36, words: "一起唱歌 Hello", startTimeMS: 3000)
+            ], isSynced: true)
+        })
+        await store.load(trackID: Self.trackID, language: .automatic)
+        #expect(store.readings[12] == "I just want to stay with you forever arigatou")
+        #expect(store.readings[24] == nil)
+        #expect(store.readings[36] == nil)
+        #expect(store.document?.lines.map(\.id) == [12, 24, 36])
+        #expect(store.document?.activeLine(at: 1000) == 12)
+    }
+
     @MainActor @Test func repeatSongFetchesAndConvertsAgain() async throws {
         let counter = WorkCounter()
         let store = PhoneLyricsStore(fetch: { _ in
@@ -82,6 +156,87 @@ struct SpotifyTransTests {
         await old.value
         #expect(store.document?.lines.first?.words == "new")
         #expect(!store.loading)
+    }
+
+    @MainActor @Test func sameSongUpdatesDoNotReloadUnlessRequested() async throws {
+        let counter = WorkCounter()
+        let store = PhoneLyricsStore(fetch: { _ in
+            await counter.fetch()
+            return try LyricsDocument.decode(Self.synced)
+        })
+        await store.load(trackID: Self.trackID, language: .automatic)
+        for _ in 0..<5 { await store.load(trackID: Self.trackID, language: .automatic) }
+        #expect(await counter.fetches == 1)
+        await store.load(trackID: Self.trackID, language: .automatic, revision: 1)
+        #expect(await counter.fetches == 2)
+        await store.load(trackID: Self.trackID, language: .automatic, revision: 1, loginRevision: 1)
+        #expect(await counter.fetches == 3)
+    }
+
+    @MainActor @Test func sameSongRefreshKeepsLyricsDuringLoadingAndFailure() async throws {
+        let counter = WorkCounter()
+        let store = PhoneLyricsStore(fetch: { _ in
+            await counter.fetch()
+            if await counter.fetches > 2 { throw URLError(.timedOut) }
+            return try LyricsDocument.decode(Self.synced)
+        })
+        await store.load(trackID: Self.trackID, language: .automatic)
+        var clearedDocument = false
+        let observation = store.$document.dropFirst().sink { if $0 == nil { clearedDocument = true } }
+        await store.load(trackID: Self.trackID, language: .automatic, revision: 1)
+        await store.load(trackID: Self.trackID, language: .automatic, revision: 2)
+        #expect(!clearedDocument)
+        #expect(store.document?.lines.first?.words == "こんにちは")
+        #expect(store.readings[0] != nil)
+        #expect(!store.loading)
+        #expect(store.message.contains("暫時無法"))
+        await store.load(trackID: "different-song", language: .automatic)
+        #expect(clearedDocument)
+        #expect(store.document == nil)
+        #expect(store.readings.isEmpty)
+        observation.cancel()
+    }
+
+    private static var playbackData: Data {
+        Data(#"{"currently_playing_type":"track","is_playing":true,"progress_ms":1000,"item":{"id":"song-a","duration_ms":10000,"name":"Song","artists":[],"external_urls":{}}}"#.utf8)
+    }
+    private static func playbackResponse(_ status: Int) -> HTTPURLResponse {
+        HTTPURLResponse(url: URL(string: "https://api.spotify.com/v1/me/player/currently-playing")!, statusCode: status, httpVersion: nil, headerFields: nil)!
+    }
+
+    @MainActor @Test func pollingFailuresPreserveSongAndResumeOnRecovery() throws {
+        let spotify = SpotifyConnection()
+        try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
+        let lastSuccessfulSync = spotify.lastPlaybackSync
+        for status in [500, 429, 200] {
+            do {
+                try spotify.applyPlaybackResponse(data: Data("invalid".utf8), response: Self.playbackResponse(status))
+                Issue.record("Expected a failed playback response")
+            } catch { spotify.preservePlaybackAfterRefreshFailure(error) }
+            #expect(spotify.track?.id == "song-a")
+            #expect(spotify.lastPlaybackSync == lastSuccessfulSync)
+            #expect(spotify.isPlaying)
+            #expect(spotify.playbackPosition(at: Date()) == spotify.playbackPosition(at: Date().addingTimeInterval(10)))
+        }
+        spotify.preservePlaybackAfterRefreshFailure(URLError(.notConnectedToInternet))
+        #expect(spotify.track?.id == "song-a")
+        try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
+        #expect(spotify.track?.id == "song-a")
+        #expect(spotify.playbackPosition(at: Date().addingTimeInterval(1))! > 1900)
+        #expect(spotify.status == "正在 Spotify 播放")
+    }
+
+    @MainActor @Test func confirmedNoPlaybackAndLostAuthorizationStillClearSong() throws {
+        let spotify = SpotifyConnection()
+        for status in [204, 401] {
+            try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
+            try spotify.applyPlaybackResponse(data: Data(), response: Self.playbackResponse(status))
+            #expect(spotify.track == nil)
+            #expect(spotify.progressMS == nil)
+        }
+        try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
+        try spotify.applyPlaybackResponse(data: Data(#"{"currently_playing_type":"episode"}"#.utf8), response: Self.playbackResponse(200))
+        #expect(spotify.track == nil)
     }
 
     @Test func oneTimeCodeMatchesStandardVector() {
@@ -135,12 +290,13 @@ struct SpotifyTransTests {
         }
     }
 
-    @MainActor @Test func measureWholeSongConversion() async throws {
+    @MainActor @Test func convertsWholeSongWithoutDroppingLines() async throws {
         let lines = (0..<180).map { LyricsDocument.Line(id: $0, words: ["明日も一緒に歌おう", "안녕하세요", "Hello world", "一起唱歌"][$0 % 4], startTimeMS: nil) }
         let store = PhoneLyricsStore(fetch: { _ in LyricsDocument(lines: lines, isSynced: false) })
         await store.load(trackID: Self.trackID, language: .automatic)
         #expect(store.document?.lines.count == 180)
-        print("180-line simulator conversion: \(store.conversionMilliseconds ?? -1) ms")
+        #expect(store.readings.count == 90)
+        #expect(store.document?.lines.map(\.id) == Array(0..<180))
     }
 }
 
