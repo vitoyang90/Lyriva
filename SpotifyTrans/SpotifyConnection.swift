@@ -14,6 +14,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
     private(set) var lastPlaybackSync: Date?
     private var sampledAt = Date()
     private var playbackStale = false
+    var canPredictPlayback: Bool { isPlaying && !playbackStale }
 
     func playbackPosition(at date: Date) -> Double? {
         guard let progressMS else { return nil }
@@ -22,43 +23,49 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
 
     let playbackStarter = SpotifyPlaybackStarter()
     private var session: ASWebAuthenticationSession?
-    // Tokens live only in memory for this prototype. No client secret is used.
-    private var accessToken = ""
-    private var refreshToken = ""
     private var clientID = ""
-    private var expiresAt = Date.distantPast
     private var retryAfter = Date.distantPast
     static let redirectURI = "spotifytrans://callback"
 
-    struct Track: Decodable {
-        let id: String?
-        let duration_ms: Int
-        let name: String
-        let artists: [Artist]
-        let external_urls: Links
-        let album: Album?
-        struct Album: Decodable {
-            let images: [Artwork]
-            struct Artwork: Decodable { let url: URL }
-        }
-        var artworkURL: URL? { album?.images.first?.url }
-        struct Artist: Decodable { let name: String }
-        struct Links: Decodable { let spotify: URL? }
-    }
+    typealias Track = SpotifyTrack
     private struct Playback: Decodable {
         let item: Track?
         let progress_ms: Double?
         let is_playing: Bool
         let currently_playing_type: String
     }
-    private struct Tokens: Decodable {
-        let access_token: String
-        let refresh_token: String?
-        let expires_in: Double
-    }
     private struct ConnectionError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
+    }
+
+    private let restoreSession: Bool
+    private let sessionStorage: any SpotifySessionStorage
+    private let authorization: SpotifyAuthorization
+    private let playbackSession: URLSession
+    init(restoreSession: Bool = true, sessionStorage: any SpotifySessionStorage = KeychainSessionStorage(),
+         authorization: SpotifyAuthorization = .shared, playbackSession: URLSession = .shared) {
+        self.restoreSession = restoreSession
+        self.sessionStorage = sessionStorage
+        self.authorization = authorization
+        self.playbackSession = playbackSession
+        super.init()
+        restoreSavedSession()
+        if restoreSession { _ = try? LyricsCredential.read() }
+    }
+
+    func restoreSavedSession() {
+        guard restoreSession, !connected, !busy else { return }
+        do {
+            guard let saved = try sessionStorage.read() else { return }
+            clientID = saved.clientID
+            connected = true
+            status = "已恢復 Spotify 登入，正在同步…"
+        } catch {
+            // A temporarily unavailable Keychain must not be mistaken for logout.
+            // Retry when the app becomes active again, without deleting the session.
+            status = "暫時無法讀取已保存的 Spotify 登入，回到 App 時會自動重試。"
+        }
     }
 
     func connect(clientID input: String) {
@@ -95,8 +102,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
                     return
                 }
                 do {
-                    try await self.requestTokens(["grant_type": "authorization_code", "code": code,
-                                                  "redirect_uri": Self.redirectURI, "code_verifier": verifier])
+                    try await self.authorization.exchange(code: code, verifier: verifier, clientID: id, redirectURI: Self.redirectURI)
                     self.connected = true
                     self.status = "已連接 Spotify，可在主畫面按播放開始。"
                 } catch { self.status = error.localizedDescription }
@@ -118,13 +124,16 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         showingActivity = showActivity
         defer { busy = false; showingActivity = false }
         do {
-            if Date() >= expiresAt {
-                try await requestTokens(["grant_type": "refresh_token", "refresh_token": refreshToken])
-            }
+            let authorization = try await self.authorization.validSession()
+            let accessToken = authorization.accessToken
             var request = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player/currently-playing")!)
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await playbackSession.data(for: request)
             guard let response = response as? HTTPURLResponse else { throw ConnectionError(message: "無法讀取 Spotify 回應。") }
+            if response.statusCode == 401 {
+                try await self.authorization.invalidate(authorization)
+                throw AuthorizationError.signedOut
+            }
             try applyPlaybackResponse(data: data, response: response)
         } catch {
             if Task.isCancelled { return }
@@ -182,26 +191,51 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
 
     enum PlaybackCommand: Equatable {
         case play, pause, previous, next
+        case seek(positionMS: Int)
         var path: String {
             switch self {
             case .play: return "play"
             case .pause: return "pause"
             case .previous: return "previous"
             case .next: return "next"
+            case .seek: return "seek"
             }
         }
         var method: String {
             switch self {
-            case .play, .pause: return "PUT"
+            case .play, .pause, .seek: return "PUT"
             case .previous, .next: return "POST"
             }
         }
         func request(token: String) -> URLRequest {
-            var request = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player/\(path)")!, timeoutInterval: 15)
+            var url = URLComponents(string: "https://api.spotify.com/v1/me/player/\(path)")!
+            if case .seek(let position) = self {
+                url.queryItems = [URLQueryItem(name: "position_ms", value: String(max(0, position)))]
+            }
+            var request = URLRequest(url: url.url!, timeoutInterval: 15)
             request.httpMethod = method
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
             return request
         }
+    }
+
+    func seek(to position: Double, trackID: String) async {
+        guard position.isFinite else { return }
+        // A drag can finish while a silent poll is in flight. Wait for it instead
+        // of silently dropping the user's seek or racing its stale response.
+        let deadline = Date().addingTimeInterval(15)
+        while busy && Date() < deadline {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+        }
+        guard !Task.isCancelled, connected, track?.id == trackID,
+              let duration = track?.duration_ms, duration > 0 else { return }
+        guard !busy else {
+            status = "同步尚未完成，請稍後再拖曳時間軸。"
+            return
+        }
+        // Seeking beyond the end starts the next song on Spotify.
+        let target = Int(min(Double(duration - 1), max(0, position)))
+        await control(.seek(positionMS: target))
     }
 
     func control(_ command: PlaybackCommand) async {
@@ -215,23 +249,35 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
             status = "Spotify 暫時限制請求，請稍後重試。"
             return
         }
+        let commandTrackID = track?.id
         busy = true
         showingActivity = true
         defer { busy = false; showingActivity = false }
         do {
-            if Date() >= expiresAt {
-                try await requestTokens(["grant_type": "refresh_token", "refresh_token": refreshToken])
+            let authorization = try await self.authorization.validSession()
+            let accessToken = authorization.accessToken
+            if case .seek = command {
+                guard connected, track?.id == commandTrackID, !Task.isCancelled else { return }
             }
-            let (_, rawResponse) = try await URLSession.shared.data(for: command.request(token: accessToken))
+            let (_, rawResponse) = try await playbackSession.data(for: command.request(token: accessToken))
             let response = rawResponse as? HTTPURLResponse
             switch response?.statusCode {
             case 200, 204:
+                if case .seek(let position) = command {
+                    guard connected, track?.id == commandTrackID else { return }
+                    progressMS = Double(position)
+                    sampledAt = Date()
+                    lastPlaybackSync = sampledAt
+                    playbackStale = false
+                    status = isPlaying ? "正在 Spotify 播放" : "Spotify 已暫停"
+                    return
+                }
                 busy = false
                 await refresh()
                 return
             case 401:
-                disconnect()
-                status = "播放授權已失效，請重新連接 Spotify。"
+                try await self.authorization.invalidate(authorization)
+                status = "播放授權需要更新，請稍後重試。"
             case 403:
                 status = "無法控制播放。請確認 Premium 資格，並重新連接 Spotify 授予播放控制權限。"
             case 404:
@@ -247,11 +293,12 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
     }
 
     func disconnect() {
+        if restoreSession {
+            do { try sessionStorage.update { $0 = nil } }
+            catch { status = error.localizedDescription; return }
+        }
         playbackStarter.reset()
         lastPlaybackSync = nil
-        accessToken = ""
-        refreshToken = ""
-        expiresAt = .distantPast
         retryAfter = .distantPast
         connected = false
         progressMS = nil
@@ -260,31 +307,8 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         status = "已中斷連線。"
     }
 
-    private func requestTokens(_ parameters: [String: String]) async throws {
-        var fields = parameters
-        fields["client_id"] = clientID
-        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        let body = fields.sorted { $0.key < $1.key }.map {
-            "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed)!)"
-        }.joined(separator: "&")
-        var request = URLRequest(url: URL(string: "https://accounts.spotify.com/api/token")!)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data(body.utf8)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            disconnect()
-            throw ConnectionError(message: "Spotify 授權失敗，請確認 Client ID 與 Redirect URI，並重新登入。")
-        }
-        let tokens = try JSONDecoder().decode(Tokens.self, from: data)
-        accessToken = tokens.access_token
-        refreshToken = tokens.refresh_token ?? refreshToken
-        expiresAt = Date().addingTimeInterval(tokens.expires_in - 60)
-    }
-
     func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
             .flatMap(\.windows).first(where: \.isKeyWindow) ?? ASPresentationAnchor()
     }
 }
-

@@ -40,24 +40,8 @@ struct SpotifyConnectionView: View {
                 .accessibilityLabel(spotify.track.map { "\($0.name) 的專輯封面" } ?? "唱片圖案")
             }
             if spotify.connected {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    let position = spotify.playbackPosition(at: context.date) ?? 0
-                    let duration = Double(spotify.track?.duration_ms ?? 0)
-                    VStack(spacing: 8) {
-                        GeometryReader { geometry in
-                            Capsule().fill(Studio.ink.opacity(0.1))
-                            Capsule().fill(Studio.accent)
-                                .frame(width: geometry.size.width * (duration > 0 ? min(1, max(0, position / duration)) : 0))
-                        }.frame(height: 3)
-                        HStack {
-                            Text(time(position))
-                            Spacer()
-                            Text(time(duration))
-                        }.font(.system(size: 10, design: .monospaced)).foregroundStyle(Studio.muted)
-                    }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("播放進度 \(time(position))，總長 \(time(duration))")
-                }
+                PlaybackTimeline(spotify: spotify, starter: starter, trackID: spotify.track?.id)
+                    .id(spotify.track?.id)
                 HStack(spacing: 12) {
                     IconButton(symbol: "arrow.clockwise", label: "更新目前歌曲") { Task { await spotify.refresh() } }
                     Spacer(minLength: 0)
@@ -75,7 +59,7 @@ struct SpotifyConnectionView: View {
                     }.accessibilityLabel("下一首")
                     Spacer(minLength: 0)
                 }
-                .buttonStyle(.plain).foregroundStyle(Studio.ink)
+                .buttonStyle(PlaybackControlButtonStyle()).foregroundStyle(Studio.ink)
                 .disabled(spotify.busy || starter.isStarting).opacity((spotify.showingActivity || starter.isStarting) ? 0.55 : 1)
                 Text(starter.message ?? spotify.status).font(.caption).foregroundStyle(Studio.muted)
                     .lineLimit(2, reservesSpace: true)
@@ -98,8 +82,76 @@ struct SpotifyConnectionView: View {
         .background(Studio.surface, in: RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Studio.ink.opacity(0.07)))
     }
+}
+
+private struct PlaybackTimeline: View {
+    @ObservedObject var spotify: SpotifyConnection
+    @ObservedObject var starter: SpotifyPlaybackStarter
+    let trackID: String?
+    @State private var previewPosition: Double?
+    @State private var submitting = false
+    @State private var seekTask: Task<Void, Never>?
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let duration = Double(max(0, spotify.track?.duration_ms ?? 0))
+            let position = min(duration, max(0, previewPosition ?? spotify.playbackPosition(at: context.date) ?? 0))
+            VStack(spacing: 0) {
+                Slider(value: Binding(
+                    get: { position },
+                    set: { previewPosition = $0 }
+                ), in: 0...max(1, duration), onEditingChanged: { editing in
+                    if !editing { commitSeek() }
+                })
+                .tint(Studio.accent)
+                .frame(minHeight: 44)
+                .disabled(duration <= 0 || spotify.track?.id == nil || starter.isStarting || submitting || spotify.showingActivity)
+                .accessibilityLabel("播放進度")
+                .accessibilityValue("\(time(position))，總長 \(time(duration))")
+                .accessibilityHint("向上或向下滑動調整播放時間")
+                .accessibilityAdjustableAction { direction in
+                    switch direction {
+                    case .increment: previewPosition = min(duration, position + 5000)
+                    case .decrement: previewPosition = max(0, position - 5000)
+                    @unknown default: return
+                    }
+                    commitSeek()
+                }
+                HStack {
+                    Text(time(position))
+                    Spacer()
+                    Text(time(duration))
+                }
+                .font(.system(size: 10, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(Studio.muted)
+                .accessibilityHidden(true)
+            }
+        }
+        .onDisappear { seekTask?.cancel() }
+    }
+
+    private func commitSeek() {
+        guard !submitting, let target = previewPosition, let trackID else { return }
+        submitting = true
+        seekTask = Task {
+            await spotify.seek(to: target, trackID: trackID)
+            previewPosition = nil
+            submitting = false
+        }
+    }
+
     private func time(_ ms: Double) -> String {
         let seconds = Int(max(0, ms) / 1000)
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+// Silent polling briefly disables controls. Keep their appearance stable instead
+// of letting the system's plain style dim them on every playback refresh.
+private struct PlaybackControlButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }

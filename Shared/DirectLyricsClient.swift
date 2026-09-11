@@ -17,7 +17,7 @@ actor DirectLyricsClient {
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
         config.urlCache = nil
-        self.session = session ?? URLSession(configuration: config, delegate: NoLyricsRedirects(), delegateQueue: nil)
+        self.session = session ?? URLSession(configuration: config, delegate: NoSpotifyRedirects(), delegateQueue: nil)
         self.cookie = cookie
     }
 
@@ -116,7 +116,7 @@ actor DirectLyricsClient {
     }
 }
 
-private final class NoLyricsRedirects: NSObject, URLSessionTaskDelegate {
+final class NoSpotifyRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         completionHandler(nil)
@@ -127,6 +127,8 @@ enum LyricsCredential {
     private static let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: "order.SpotifyTrans.lyrics", kSecAttrAccount as String: "web-session"]
     static func read() throws -> String {
+        if let data = try SharedKeychain(account: "lyrics").read(), let value = String(data: data, encoding: .utf8) { return value }
+        // Migrate the app’s previous private Keychain item once, on this device.
         var request = query
         request[kSecReturnData as String] = true
         var result: CFTypeRef?
@@ -134,19 +136,15 @@ enum LyricsCredential {
         guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
             throw LyricsError.message("請先登入歌詞來源。")
         }
+        try save(value)
         return value
     }
     static func save(_ value: String) throws {
-        let data = Data(value.utf8)
-        let attributes: [String: Any] = [kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            let insert = query.merging(attributes) { _, new in new }
-            guard SecItemAdd(insert as CFDictionary, nil) == errSecSuccess else { throw LyricsError.message("無法保存歌詞登入。") }
-        } else if status != errSecSuccess { throw LyricsError.message("無法更新歌詞登入。") }
+        try SharedKeychain(account: "lyrics").write(Data(value.utf8))
+        SecItemDelete(query as CFDictionary)
     }
     static func delete() throws {
+        try SharedKeychain(account: "lyrics").write(nil)
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw LyricsError.message("無法清除歌詞登入。") }
     }

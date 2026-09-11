@@ -78,6 +78,7 @@ struct ContentView: View {
             }
         }
         .task(id: "\(spotify.connected)-\(scenePhase == .active)") {
+            if scenePhase == .active { spotify.restoreSavedSession() }
             guard spotify.connected, scenePhase == .active else { return }
             while !Task.isCancelled {
                 await spotify.refresh(showActivity: false)

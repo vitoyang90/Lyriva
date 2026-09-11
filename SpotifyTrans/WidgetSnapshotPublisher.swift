@@ -11,26 +11,9 @@ final class WidgetSnapshotPublisher: ObservableObject {
     private var artworkData: Data?
     private var hasCleared = false
 
-    static func snapshot(track: SpotifyConnection.Track, document: LyricsDocument?, readings: [Int: String],
+    static func snapshot(track: SpotifyTrack, document: LyricsDocument?, readings: [Int: String],
                          position: Double?, date: Date = Date()) -> WidgetSongSnapshot? {
-        guard let id = track.id else { return nil }
-        let index: Int?
-        if let document, document.isSynced {
-            let active = position.flatMap { document.activeLine(at: $0) }
-            index = document.lines.firstIndex { $0.id == active }
-        } else { index = document?.lines.firstIndex { !$0.words.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } }
-        let line = index.flatMap { document?.lines[$0] }
-        let next = index.flatMap { i -> LyricsDocument.Line? in
-            guard let document, document.lines.indices.contains(i + 1) else { return nil }
-            return document.lines[i + 1]
-        }
-        // Bound the shared payload even if a provider returns unusually long metadata or lyrics.
-        func clipped(_ text: String?) -> String? { text.map { String($0.prefix(240)) } }
-        return WidgetSongSnapshot(trackID: id, title: String(track.name.prefix(120)),
-                                  artist: String(track.artists.map(\.name).joined(separator: " · ").prefix(160)),
-                                  original: clipped(line?.words), romanization: clipped(line.flatMap { readings[$0.id] }),
-                                  nextOriginal: clipped(next?.words), nextRomanization: clipped(next.flatMap { readings[$0.id] }),
-                                  updatedAt: date)
+        WidgetSongSnapshot.snapshot(track: track, document: document, readings: readings, position: position, date: date)
     }
 
     func update(spotify: SpotifyConnection, lyrics: PhoneLyricsStore, force: Bool = false) {
@@ -41,6 +24,15 @@ final class WidgetSnapshotPublisher: ObservableObject {
         guard var snapshot = Self.snapshot(track: track, document: document, readings: lyrics.readings,
                                            position: spotify.playbackPosition(at: Date()),
                                            date: spotify.lastPlaybackSync ?? Date()) else { return }
+        snapshot.authorizationID = try? KeychainSessionStorage().read()?.id
+        if spotify.canPredictPlayback, let sampledAt = spotify.lastPlaybackSync, let position = spotify.progressMS {
+            snapshot.playbackEndsAt = sampledAt.addingTimeInterval(max(0, Double(track.duration_ms) - position) / 1000)
+        }
+        if spotify.canPredictPlayback, let sampledAt = spotify.lastPlaybackSync, let position = spotify.progressMS,
+           let document, document.isSynced {
+            snapshot.playback = WidgetSongSnapshot.plan(track: track, document: document, readings: lyrics.readings,
+                                                        sampledAt: sampledAt, position: position)
+        }
         let key = id + (track.artworkURL?.absoluteString ?? "")
         if artworkKey != key {
             artworkKey = key

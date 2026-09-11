@@ -44,7 +44,7 @@ struct ConnectionSettingsView: View {
                             }.font(.caption).foregroundStyle(Studio.muted).padding(.top, 12)
                         }
                     }
-                    Text("播放控制需要 Premium，手機須安裝並登入 Spotify。回到主畫面按播放即可啟動；首次會切換至 Spotify 完成授權。")
+                    Text("只需登入一次：App 會安全保存登入，重新開啟時自動恢復並更新授權，供 App 與小工具使用。主動中斷連線或授權被撤銷後才需要重新登入。播放控制需要 Premium，手機須安裝並登入 Spotify；首次啟動播放會切換至 Spotify 完成授權。")
                         .font(.caption).foregroundStyle(Studio.muted)
                 }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
                 VStack(alignment: .leading, spacing: 16) {
@@ -61,9 +61,9 @@ struct ConnectionSettingsView: View {
                         .font(.caption).foregroundStyle(Studio.muted)
                 }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
                 VStack(alignment: .leading, spacing: 12) {
-                    Label("主畫面歌詞快照", systemImage: "square.grid.2x2").font(.headline)
+                    Label("主畫面歌詞小工具", systemImage: "square.grid.2x2").font(.headline)
                     Text("長按 iPhone 主畫面，選擇加入小工具，再搜尋 SpotifyTrans。提供小、中、大三種尺寸，點一下即可回到 App。")
-                    Text("顯示最近同步的歌曲與歌詞，離開 App 後會停留在那一句，不會自動換詞。即時跟唱請在 App 內使用。只保存一份目前歌曲的顯示資料，換歌時覆蓋，不保存歷史歌詞。")
+                    Text("依歌曲時間標記預排換句；歌曲播完後會請求更新，在 iOS 允許時自動取得目前歌曲與歌詞。系統可能延後執行，無法保證換歌或換句即時同步；點擊小工具回 App 可立即校正。只保存目前歌曲，換歌覆蓋。")
                         .foregroundStyle(Studio.muted)
                 }.font(.caption).padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
                 Text("羅馬字在裝置上產生，不使用 LLM，也不保存歷史歌詞。讀音僅供參考，可能與歌曲唱法不同。")

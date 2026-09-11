@@ -205,7 +205,7 @@ struct SpotifyTransTests {
     }
 
     @MainActor @Test func pollingFailuresPreserveSongAndResumeOnRecovery() throws {
-        let spotify = SpotifyConnection()
+        let spotify = SpotifyConnection(restoreSession: false)
         try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
         let lastSuccessfulSync = spotify.lastPlaybackSync
         for status in [500, 429, 200] {
@@ -216,6 +216,7 @@ struct SpotifyTransTests {
             #expect(spotify.track?.id == "song-a")
             #expect(spotify.lastPlaybackSync == lastSuccessfulSync)
             #expect(spotify.isPlaying)
+            #expect(!spotify.canPredictPlayback)
             #expect(spotify.playbackPosition(at: Date()) == spotify.playbackPosition(at: Date().addingTimeInterval(10)))
         }
         spotify.preservePlaybackAfterRefreshFailure(URLError(.notConnectedToInternet))
@@ -227,7 +228,7 @@ struct SpotifyTransTests {
     }
 
     @MainActor @Test func confirmedNoPlaybackAndLostAuthorizationStillClearSong() throws {
-        let spotify = SpotifyConnection()
+        let spotify = SpotifyConnection(restoreSession: false)
         for status in [204, 401] {
             try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
             try spotify.applyPlaybackResponse(data: Data(), response: Self.playbackResponse(status))

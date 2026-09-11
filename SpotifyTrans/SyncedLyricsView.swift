@@ -6,7 +6,7 @@ struct SyncedLyricsView: View {
     var loginRevision: Int
     var openSettings: () -> Void
     @State private var revision = 0
-    @State private var language = LyricsLanguage.automatic
+    @AppStorage("lyricsLanguage", store: UserDefaults(suiteName: WidgetSongSnapshot.appGroup)) private var language = LyricsLanguage.automatic
     @State private var showOriginal = true
     @State private var follow = true
     @State private var fontSize = 24.0

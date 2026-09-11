@@ -4,6 +4,17 @@ import WidgetKit
 struct LyricsWidgetEntry: TimelineEntry {
     let date: Date
     let song: WidgetSongSnapshot?
+    var isPredicted = false
+    var isExpired = false
+
+    static func scheduled(song: WidgetSongSnapshot?, at date: Date) -> Self {
+        var displayed = song?.lyrics(at: date)
+        // WidgetKit receives only the two displayed lines, not a copy of the whole
+        // remaining song in every entry of the timeline.
+        displayed?.playback = nil
+        return Self(date: date, song: displayed, isPredicted: song?.playback?.isValid == true,
+                    isExpired: song?.isExpired(at: date) == true)
+    }
 }
 
 struct LyricsWidgetView: View {
@@ -25,14 +36,14 @@ struct LyricsWidgetView: View {
                     }
                     Spacer(minLength: 0)
                 }
-                if song.isExpired(at: entry.date) {
-                    Text("回來，繼續跟唱。")
+                if entry.isExpired || song.isExpired(at: entry.date) {
+                    Text("等待歌曲更新")
                         .font(.system(size: small ? 15 : 21, weight: .semibold, design: .rounded))
-                    Text("點一下更新歌詞").font(.caption).foregroundStyle(accent)
+                    Text("點一下可回 App 立即校正").font(.caption).foregroundStyle(accent)
                     Spacer(minLength: 0)
                 } else {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(song.original.flatMap { $0.isEmpty ? nil : $0 } ?? "開啟 App 同步歌詞")
+                        Text(song.original.flatMap { $0.isEmpty ? nil : $0 } ?? (song.notice ?? (entry.isPredicted ? "♪" : "暫時沒有歌詞")))
                             .font(.system(size: small ? 15 : 20, weight: .semibold, design: .rounded))
                             .lineLimit(family == .systemMedium ? 1 : 2).minimumScaleFactor(0.85)
                         if let reading = song.romanization, !reading.isEmpty {
@@ -52,7 +63,7 @@ struct LyricsWidgetView: View {
                 }
                 HStack(spacing: 4) {
                     Image(systemName: "clock").foregroundStyle(accent)
-                    Text("歌詞快照").lineLimit(1)
+                    Text(entry.isPredicted ? "預估進度" : "最近同步").lineLimit(1)
                     Text(song.updatedAt, style: .time).monospacedDigit().lineLimit(1)
                     Spacer(minLength: 0)
                     if !small { Image(systemName: "arrow.up.right") }
