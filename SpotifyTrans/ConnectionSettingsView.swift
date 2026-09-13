@@ -1,79 +1,183 @@
 import SwiftUI
+import WebKit
 
-struct ConnectionSettingsView: View {
+struct SpotifyLoginView: View {
     @ObservedObject var spotify: SpotifyConnection
+    @ObservedObject var lyrics: PhoneLyricsStore
     var onLyricsLogin: () -> Void
     @Environment(\.dismiss) private var dismiss
     @AppStorage("spotifyClientID") private var clientID = ""
     @State private var loginShown = false
+    @State private var lyricsSaved = false
+    @State private var credentialUnavailable = false
+    @State private var signingOut = false
     @State private var message = ""
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 HStack {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("MAKE IT YOURS").font(.system(size: 10, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(Studio.accent)
-                        Text("連線與設定").font(.title.bold())
-                    }
+                    Text("Lyriva").font(.title.bold())
                     Spacer()
-                    IconButton(symbol: "xmark", label: "關閉設定") { dismiss() }
+                    IconButton(symbol: "xmark", label: "關閉登入頁") { dismiss() }
+                }
+                Image("LyrivaMark").resizable().scaledToFit()
+                    .frame(width: 80, height: 80)
+                    .clipShape(RoundedRectangle(cornerRadius: 22)).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(spotify.connected && !spotify.requiresReauthorization ? "準備開始跟唱" : "連接你的 Spotify")
+                        .font(.largeTitle.bold())
+                    Text("連接帳號，讓歌詞跟著音樂走。")
+                        .foregroundStyle(Studio.muted)
                 }
                 VStack(alignment: .leading, spacing: 16) {
-                    Label("Spotify 播放控制", systemImage: "play.circle").font(.headline)
-                    Text(spotify.status).font(.subheadline).foregroundStyle(Studio.muted)
-                    if spotify.connected {
-                        Button("中斷 Spotify 連線") { spotify.disconnect() }
-                            .buttonStyle(StudioButton()).disabled(spotify.busy)
-                    } else {
-                        Text("CLIENT ID").font(.system(size: 10, weight: .bold, design: .monospaced)).tracking(2).foregroundStyle(Studio.muted)
-                        TextField("輸入 Spotify Client ID", text: $clientID)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .padding(16).background(Studio.background, in: RoundedRectangle(cornerRadius: 14))
-                            .accessibilityLabel("Spotify Client ID")
-                        Button {
-                            spotify.connect(clientID: clientID)
-                        } label: {
-                            HStack { Text("登入 Spotify"); Spacer(); Image(systemName: "arrow.right") }
-                        }.buttonStyle(StudioButton(prominent: true)).disabled(spotify.busy)
-                        DisclosureGroup("第一次設定") {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("在 Developer Dashboard 建立 App，將下方網址加入 Redirect URI。")
-                                Text(SpotifyConnection.redirectURI).textSelection(.enabled).foregroundStyle(Studio.accent)
-                                Link("開啟 Developer Dashboard ↗", destination: URL(string: "https://developer.spotify.com/dashboard")!)
-                            }.font(.caption).foregroundStyle(Studio.muted).padding(.top, 12)
+                    Label("Spotify 帳號", systemImage: "person.crop.circle").font(.headline)
+                    accountStatus("播放", value: spotify.requiresReauthorization ? "需要重新授權" : (spotify.connected ? "已保存登入" : "尚未設定"))
+                    accountStatus("歌詞", value: credentialUnavailable ? "暫時無法讀取" : (lyrics.needsLogin ? "需要更新登入" : (lyricsSaved ? "已保存登入" : "尚未啟用")))
+                    if !spotify.connected || spotify.requiresReauthorization {
+                        if !spotify.connected {
+                            TextField("Spotify Client ID", text: $clientID)
+                                .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                .padding(16).background(Studio.background, in: RoundedRectangle(cornerRadius: 14))
+                                .accessibilityLabel("Spotify Client ID")
                         }
+                        Text(spotify.status).font(.caption).foregroundStyle(Studio.muted)
+                        Button(spotify.requiresReauthorization ? "重新授權 Spotify" : "連接 Spotify") {
+                            spotify.connect(clientID: spotify.requiresReauthorization ? spotify.savedClientID : clientID)
+                        }.buttonStyle(StudioButton(prominent: true)).disabled(spotify.busy || signingOut)
+                        if !spotify.connected {
+                            DisclosureGroup("如何取得 Client ID") {
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("在 Spotify Developer Dashboard 建立應用程式，複製 Client ID，並加入以下 Redirect URI。")
+                                    Text(SpotifyConnection.redirectURI).textSelection(.enabled).foregroundStyle(Studio.accent)
+                                    Link("開啟 Developer Dashboard ↗", destination: URL(string: "https://developer.spotify.com/dashboard")!)
+                                }.font(.caption).foregroundStyle(Studio.muted).padding(.top, 12)
+                            }
+                        }
+                    } else if credentialUnavailable {
+                        Button("重試讀取登入資料") { readLyricsLogin() }.buttonStyle(StudioButton())
+                    } else if !lyricsSaved || lyrics.needsLogin {
+                        Text("首次啟用歌詞需完成 Spotify 網頁登入，之後會保存在此裝置。")
+                            .font(.caption).foregroundStyle(Studio.muted)
+                        Button(lyrics.needsLogin ? "更新歌詞登入" : "啟用歌詞") { loginShown = true }
+                            .buttonStyle(StudioButton(prominent: true)).disabled(signingOut)
+                    } else {
+                        Text("下次開啟 App 將自動連線。")
+                            .font(.caption).foregroundStyle(Studio.muted)
                     }
-                    Text("只需登入一次：App 會安全保存登入，重新開啟時自動恢復並更新授權，供 App 與小工具使用。主動中斷連線或授權被撤銷後才需要重新登入。播放控制需要 Premium，手機須安裝並登入 Spotify；首次啟動播放會切換至 Spotify 完成授權。")
-                        .font(.caption).foregroundStyle(Studio.muted)
-                }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
-                VStack(alignment: .leading, spacing: 16) {
-                    Label("手機歌詞來源", systemImage: "text.bubble").font(.headline)
-                    Text("另外登入 Spotify 網頁以讀取歌詞，登入憑證只保存在此手機。")
-                        .font(.subheadline).foregroundStyle(Studio.muted)
-                    Button("登入／更新歌詞來源") { loginShown = true }.buttonStyle(StudioButton())
-                    Button("清除歌詞登入") {
-                        do { try LyricsCredential.delete(); message = "已清除歌詞登入。" }
-                        catch { message = error.localizedDescription }
-                    }.font(.caption).foregroundStyle(Studio.muted).frame(minHeight: 44)
                     if !message.isEmpty { Text(message).font(.caption).foregroundStyle(Studio.accent) }
-                    Text("使用非官方歌詞介面。若暫時無法取得歌詞，請重新登入或稍後重試。")
-                        .font(.caption).foregroundStyle(Studio.muted)
+                    if spotify.connected || lyricsSaved || credentialUnavailable {
+                        DisclosureGroup("管理帳號") {
+                            Button(signingOut ? "登出中…" : "登出 Spotify", role: .destructive) {
+                                Task { await signOut() }
+                            }.frame(minHeight: 44).disabled(spotify.busy || signingOut)
+                        }.font(.subheadline)
+                    }
                 }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("主畫面歌詞小工具", systemImage: "square.grid.2x2").font(.headline)
-                    Text("長按 iPhone 主畫面，選擇加入小工具，再搜尋 SpotifyTrans。提供小、中、大三種尺寸，點一下即可回到 App。")
-                    Text("依歌曲時間標記預排換句；歌曲播完後會請求更新，在 iOS 允許時自動取得目前歌曲與歌詞。系統可能延後執行，無法保證換歌或換句即時同步；點擊小工具回 App 可立即校正。只保存目前歌曲，換歌覆蓋。")
-                        .foregroundStyle(Studio.muted)
-                }.font(.caption).padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
-                Text("羅馬字在裝置上產生，不使用 LLM，也不保存歷史歌詞。讀音僅供參考，可能與歌曲唱法不同。")
-                    .font(.caption).foregroundStyle(Studio.muted).lineSpacing(4)
+                if spotify.connected && !spotify.requiresReauthorization {
+                    Button(lyricsSaved && !lyrics.needsLogin ? "開始使用" : "稍後啟用歌詞，先開始使用") { dismiss() }
+                        .buttonStyle(StudioButton(prominent: lyricsSaved && !lyrics.needsLogin))
+                        .disabled(signingOut)
+                }
             }.padding(24)
         }
         .foregroundStyle(Studio.ink).background(Studio.background).tint(Studio.accent)
         .preferredColorScheme(.dark)
+        .onAppear { readLyricsLogin() }
         .sheet(isPresented: $loginShown) {
-            SpotifyWebLogin { message = "歌詞登入已更新。"; onLyricsLogin() }
+            SpotifyWebLogin {
+                onLyricsLogin()
+                readLyricsLogin()
+                message = "已保存登入資料"
+            }
+        }
+    }
+
+    private func accountStatus(_ title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text(value).foregroundStyle(Studio.muted)
+        }.font(.subheadline).accessibilityElement(children: .combine)
+    }
+
+    private func readLyricsLogin() {
+        do {
+            lyricsSaved = try LyricsCredential.readIfPresent() != nil
+            credentialUnavailable = false
+            message = ""
+        } catch {
+            credentialUnavailable = true
+            message = error.localizedDescription
+        }
+    }
+
+    @MainActor private func signOut() async {
+        signingOut = true
+        defer { signingOut = false }
+        spotify.disconnect()
+        guard !spotify.connected else { message = spotify.status; return }
+        do {
+            try LyricsCredential.delete()
+            let dataStore = WKWebsiteDataStore.default()
+            await dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
+            onLyricsLogin()
+            readLyricsLogin()
+            message = "已登出 Spotify"
+        } catch {
+            readLyricsLogin()
+            message = "播放已登出，但歌詞登入資料尚未清除，請重試。"
+        }
+    }
+}
+
+struct ConnectionSettingsView: View {
+    @ObservedObject var spotify: SpotifyConnection
+    @ObservedObject var lyrics: PhoneLyricsStore
+    var onLyricsLogin: () -> Void
+    @State private var loginShown = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Label("Spotify 帳號", systemImage: "person.crop.circle").font(.headline)
+                    Text(spotify.requiresReauthorization ? "需要重新授權" : (spotify.connected ? "已保存登入" : "尚未連接"))
+                        .font(.subheadline).foregroundStyle(Studio.muted)
+                    Button("管理 Spotify 帳號") { loginShown = true }.buttonStyle(StudioButton())
+                }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
+                NavigationLink {
+                    TranslationLanguagesView()
+                } label: {
+                    HStack(spacing: 14) {
+                        Image(systemName: "character.bubble").font(.title2).foregroundStyle(Studio.accent)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("翻譯語言").font(.headline)
+                            Text("管理本機翻譯與語言下載").font(.subheadline).foregroundStyle(Studio.muted)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(Studio.muted)
+                    }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
+                }.buttonStyle(.plain)
+                DisclosureGroup("使用說明") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("播放控制需 Spotify Premium，並已安裝及登入 Spotify。")
+                        Text("長按主畫面加入小工具，搜尋 Lyriva。")
+                        Text("小工具更新可能延遲，點一下可開啟 App 更新。")
+                        Text("歌詞使用非官方來源，部分歌曲可能無法取得。羅馬字讀音僅供參考。")
+                    }.font(.caption).foregroundStyle(Studio.muted).padding(.top, 12)
+                }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
+            }.padding(24)
+        }
+        .foregroundStyle(Studio.ink).background(Studio.background).tint(Studio.accent)
+        .preferredColorScheme(.dark)
+        .navigationTitle("設定")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .toolbarBackground(Studio.background, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .fullScreenCover(isPresented: $loginShown) {
+            SpotifyLoginView(spotify: spotify, lyrics: lyrics, onLyricsLogin: onLyricsLogin)
         }
     }
 }

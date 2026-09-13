@@ -112,10 +112,26 @@ struct LyricsRomanizer {
             let reading = CFStringTokenizerCopyCurrentTokenAttribute(tokenizer,
                 kCFStringTokenizerAttributeLatinTranscription) as? String
             // Unknown names/characters can have an empty transcription. Never drop them.
-            output += reading.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? original
+            let transcription = reading.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? original
+            // The modern particle を is pronounced o; Katakana ウォ and words
+            // containing the full-sized つ keep their own transcriptions.
+            output += original == "を" ? "o" : transcription
             end = range.location + range.length
         }
         if end < source.length { output += source.substring(from: end) }
-        return output == text ? nil : output
+        let normalized = Self.normalizeSokuon(output)
+        return normalized == text ? nil : normalized
+    }
+
+    // CFStringTokenizer can split an inflection at small っ, e.g.
+    // しまっ + た -> shima~tsu + ta. Resolve its marker after joining tokens,
+    // while still inside this contiguous Japanese run (never across punctuation
+    // or English text). A final small っ represents a clipped ending.
+    static func normalizeSokuon(_ reading: String) -> String {
+        var result = reading.replacingOccurrences(of: #"\s*~tsu\s*(?=ch)"#,
+                                                  with: "t", options: .regularExpression)
+        result = result.replacingOccurrences(of: #"\s*~tsu\s*(?=([bcdfghjkpqstvxz]))"#,
+                                             with: "$1", options: .regularExpression)
+        return result.replacingOccurrences(of: #"\s*~tsu"#, with: "’", options: .regularExpression)
     }
 }

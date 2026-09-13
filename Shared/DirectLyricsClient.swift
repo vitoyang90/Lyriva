@@ -23,12 +23,12 @@ actor DirectLyricsClient {
 
     func fetch(trackID: String) async throws -> LyricsDocument {
         guard trackID.count == 22, trackID.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else {
-            throw LyricsError.message("這首歌沒有可用的 Spotify ID。")
+            throw LyricsError.message("此歌曲不支援歌詞。")
         }
-        guard Date() >= nextAllowedRequest else { throw LyricsError.message("Spotify 暫時限制請求，請稍後重試。") }
+        guard Date() >= nextAllowedRequest else { throw LyricsError.message("更新過於頻繁，請稍後再試。") }
         let credential = try cookie()
         guard !credential.isEmpty, credential.unicodeScalars.allSatisfy({ $0.value > 32 && $0.value < 127 && $0 != ";" }) else {
-            throw LyricsError.message("請先登入歌詞來源。")
+            throw LyricsError.authenticationRequired
         }
         let fingerprint = SHA256.hash(data: Data(credential.utf8))
         if fingerprint != cookieFingerprint {
@@ -39,10 +39,18 @@ actor DirectLyricsClient {
         var request = URLRequest(url: URL(string: "https://spclient.wg.spotify.com/color-lyrics/v2/track/\(trackID)?format=json&market=from_token")!, timeoutInterval: 20)
         request.setValue("Bearer \(token!)", forHTTPHeaderField: "Authorization")
         request.setValue("WebPlayer", forHTTPHeaderField: "App-platform")
-        let data = try await get(request)
+        let data: Data
+        do {
+            data = try await get(request)
+        } catch LyricsHTTPError.unauthorized {
+            // A short-lived web token expiring does not invalidate the saved cookie.
+            try await authenticate(cookie: credential)
+            request.setValue("Bearer \(token!)", forHTTPHeaderField: "Authorization")
+            data = try await get(request)
+        }
         guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               var payload = root["lyrics"] as? [String: Any] else {
-            throw LyricsError.message("Spotify 歌詞格式已變更，暫時無法讀取。")
+            throw LyricsError.message("暫時無法載入歌詞，請稍後再試。")
         }
         payload["error"] = false
         return try LyricsDocument.decode(JSONSerialization.data(withJSONObject: payload))
@@ -55,13 +63,13 @@ actor DirectLyricsClient {
         guard let version = constants.keys.compactMap(Int.init).max(),
               let values = constants[String(version)], !values.isEmpty, values.count < 1024,
               values.allSatisfy({ (0...255).contains($0) }) else {
-            throw LyricsError.message("無法取得網頁歌詞協定資訊，請稍後重試。")
+            throw LyricsError.message("歌詞服務暫時無法使用，請稍後再試。")
         }
         let key = values.enumerated().map { String($0.element ^ (($0.offset % 33) + 9)) }.joined()
         let timeData = try await get(URLRequest(url: URL(string: "https://open.spotify.com/api/server-time")!, timeoutInterval: 15))
         struct ServerTime: Decodable { let serverTime: Double }
         let time = try JSONDecoder().decode(ServerTime.self, from: timeData).serverTime
-        guard time.isFinite, time > 0, time < 100_000_000_000 else { throw LyricsError.message("Spotify 伺服器時間無效。") }
+        guard time.isFinite, time > 0, time < 100_000_000_000 else { throw LyricsError.message("歌詞服務暫時無法使用，請稍後再試。") }
         var endpoint = URLComponents(string: "https://open.spotify.com/api/token")!
         endpoint.queryItems = ["reason": "transport", "productType": "web-player",
                                "totp": Self.oneTimeCode(key: Data(key.utf8), seconds: time),
@@ -70,17 +78,20 @@ actor DirectLyricsClient {
         var request = URLRequest(url: endpoint.url!, timeoutInterval: 20)
         request.setValue("sp_dc=\(cookie)", forHTTPHeaderField: "Cookie")
         request.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
-        let data = try await get(request)
+        let data: Data
+        do { data = try await get(request) }
+        catch LyricsHTTPError.unauthorized { throw LyricsError.authenticationRequired }
         struct WebToken: Decodable {
             let accessToken: String?
             let accessTokenExpirationTimestampMs: Double?
             let isAnonymous: Bool?
         }
         let response = try JSONDecoder().decode(WebToken.self, from: data)
-        guard response.isAnonymous != true, let accessToken = response.accessToken, !accessToken.isEmpty,
+        guard response.isAnonymous != true else { throw LyricsError.authenticationRequired }
+        guard let accessToken = response.accessToken, !accessToken.isEmpty,
               let expiry = response.accessTokenExpirationTimestampMs, expiry.isFinite,
               expiry > Date().timeIntervalSince1970 * 1000 else {
-            throw LyricsError.message("歌詞登入已失效，請重新登入歌詞來源。")
+            throw LyricsError.message("歌詞連線暫時無法更新，請稍後再試。")
         }
         token = accessToken
         tokenExpiry = Date(timeIntervalSince1970: expiry / 1000 - 30)
@@ -98,23 +109,27 @@ actor DirectLyricsClient {
 
     private func get(_ request: URLRequest) async throws -> Data {
         let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else { throw LyricsError.message("無法讀取歌詞來源回應。") }
+        guard let response = response as? HTTPURLResponse else { throw LyricsError.message("暫時無法載入歌詞，請稍後再試。") }
         switch response.statusCode {
         case 200: break
-        case 401, 403:
+        case 401:
             token = nil
-            throw LyricsError.message("歌詞授權被拒絕，請重新登入歌詞來源；若仍失敗，可能是非官方介面已變更。")
-        case 404: throw LyricsError.message("找不到這首歌的歌詞，請稍後重試。")
+            throw LyricsHTTPError.unauthorized
+        case 403:
+            throw LyricsError.message("歌詞服務暫時拒絕存取，請稍後再試。")
+        case 404: throw LyricsError.message("此歌曲尚無歌詞。")
         case 429:
             let delay = Double(response.value(forHTTPHeaderField: "Retry-After") ?? "30") ?? 30
             nextAllowedRequest = Date().addingTimeInterval(delay.isFinite ? max(1, delay) : 30)
-            throw LyricsError.message("Spotify 暫時限制請求，請稍後重試。")
-        default: throw LyricsError.message("歌詞來源暫時無法使用（\(response.statusCode)）。")
+            throw LyricsError.message("更新過於頻繁，請稍後再試。")
+        default: throw LyricsError.message("歌詞服務暫時無法使用，請稍後再試。")
         }
-        guard data.count < 2_000_000 else { throw LyricsError.message("歌詞來源回應過大。") }
+        guard data.count < 2_000_000 else { throw LyricsError.message("暫時無法載入歌詞，請稍後再試。") }
         return data
     }
 }
+
+private enum LyricsHTTPError: Error { case unauthorized }
 
 final class NoSpotifyRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
@@ -127,14 +142,22 @@ enum LyricsCredential {
     private static let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: "order.SpotifyTrans.lyrics", kSecAttrAccount as String: "web-session"]
     static func read() throws -> String {
-        if let data = try SharedKeychain(account: "lyrics").read(), let value = String(data: data, encoding: .utf8) { return value }
+        guard let value = try readIfPresent() else { throw LyricsError.authenticationRequired }
+        return value
+    }
+    static func readIfPresent() throws -> String? {
+        if let data = try SharedKeychain(account: "lyrics").read() {
+            guard let value = String(data: data, encoding: .utf8), !value.isEmpty else { throw AuthorizationError.storage }
+            return value
+        }
         // Migrate the app’s previous private Keychain item once, on this device.
         var request = query
         request[kSecReturnData as String] = true
         var result: CFTypeRef?
         let status = SecItemCopyMatching(request as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else {
-            throw LyricsError.message("請先登入歌詞來源。")
+            throw AuthorizationError.storage
         }
         try save(value)
         return value
@@ -146,6 +169,6 @@ enum LyricsCredential {
     static func delete() throws {
         try SharedKeychain(account: "lyrics").write(nil)
         let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw LyricsError.message("無法清除歌詞登入。") }
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw LyricsError.message("無法清除登入資料，請重試。") }
     }
 }

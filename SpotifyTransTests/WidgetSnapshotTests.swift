@@ -113,7 +113,7 @@ struct WidgetSnapshotTests {
 
     @MainActor @Test func renderWidgetSizesAndEmptyStates() throws {
         let now = Date()
-        let song = WidgetSongSnapshot(trackID: "preview", title: "聽見世界，跟著唱", artist: "SpotifyTrans", original: "明日も一緒に歌おう", romanization: "asu mo issho ni utaou", nextOriginal: "世界", nextRomanization: "sekai", updatedAt: now)
+        let song = WidgetSongSnapshot(trackID: "preview", title: "範例歌曲", artist: "Lyriva", original: "明日も一緒に歌おう", romanization: "asu mo issho ni utaou", nextOriginal: "世界", nextRomanization: "sekai", updatedAt: now)
         for (family, width, height) in [(WidgetFamily.systemSmall, 170.0, 170.0), (.systemMedium, 360.0, 170.0), (.systemLarge, 360.0, 376.0)] {
             for state in ["lyrics", "empty", "expired"] {
                 let entry = LyricsWidgetEntry(date: state == "expired" ? now.addingTimeInterval(900) : now, song: state == "empty" ? nil : song)

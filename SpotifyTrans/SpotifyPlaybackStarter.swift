@@ -45,25 +45,25 @@ final class SpotifyPlaybackStarter: ObservableObject {
     func start(clientID: String) {
         guard !isStarting else { return }
         guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            message = "請先在設定中連接 Spotify。"
+            message = "請先連接 Spotify。"
             return
         }
         let id = UUID()
         attempt = id
         leftApp = false
         isStarting = true
-        message = "正在開啟 Spotify，接續上次播放…"
+        message = "正在開啟 Spotify…"
         authorizer.authorize(clientID: clientID, redirectURL: URL(string: SpotifyConnection.redirectURI)!) { [weak self] opened in
             Task { @MainActor in
                 guard let self, self.attempt == id else { return }
                 // SDK completion only confirms that Spotify can handle the request.
-                if !opened { self.finish(message: "無法開啟 Spotify，請確認手機已安裝並登入 Spotify。") }
+                if !opened { self.finish(message: "無法開啟 Spotify，請確認已安裝並登入。") }
             }
         }
         timeout = Task { [weak self] in
             do { try await Task.sleep(for: .seconds(60)) } catch { return }
             guard let self, self.attempt == id else { return }
-            self.finish(message: "尚未完成 Spotify 啟動，請再次按播放重試。")
+            self.finish(message: "Spotify 啟動逾時，請再按一次播放。")
         }
     }
 
@@ -72,7 +72,7 @@ final class SpotifyPlaybackStarter: ObservableObject {
         guard isStarting, url.scheme == "spotifytrans", url.host == "callback",
               url.path.isEmpty, url.user == nil, url.password == nil, url.port == nil,
               let authorized = authorizer.result(from: url) else { return false }
-        finish(message: authorized ? nil : "Spotify 播放授權未完成，請再次按播放重試。")
+        finish(message: authorized ? nil : "授權未完成，請再按一次播放。")
         // Refresh real playback state instead of assuming that authorization started music.
         return authorized
     }
@@ -91,7 +91,7 @@ final class SpotifyPlaybackStarter: ObservableObject {
 
     func returnedWithoutCallback() {
         guard isStarting else { return }
-        finish(message: "未收到 Spotify 的播放確認，請再次按播放重試。")
+        finish(message: "無法確認播放狀態，請再按一次播放。")
     }
 
     func reset() { finish(message: nil) }

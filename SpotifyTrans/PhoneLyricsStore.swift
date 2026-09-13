@@ -6,7 +6,8 @@ final class PhoneLyricsStore: ObservableObject {
     @Published private(set) var document: LyricsDocument?
     @Published private(set) var readings: [Int: String] = [:]
     @Published private(set) var loading = false
-    @Published private(set) var message = "連接 Spotify 並播放歌曲，即可讀取歌詞。"
+    @Published private(set) var needsLogin = false
+    @Published private(set) var message = "播放歌曲後顯示歌詞。"
     private struct Request: Equatable {
         let trackID: String?
         let language: LyricsLanguage
@@ -48,24 +49,35 @@ final class PhoneLyricsStore: ObservableObject {
             displayedTrackID = nil
         }
         loading = trackID != nil
-        guard let trackID else { message = "請先連接 Spotify 並播放歌曲。"; return }
-        message = "正在取得歌詞…"
+        guard let trackID else { message = "播放歌曲後顯示歌詞。"; return }
+        message = "載入歌詞中…"
         defer { if generation == requestID { loading = false } }
         do {
             let lyrics = try await fetch(trackID)
             guard generation == requestID, !Task.isCancelled else { return }
-            message = "正在裝置上產生羅馬字…"
+            message = "處理歌詞中…"
             let result = await convert(lyrics, language)
             guard generation == requestID, !Task.isCancelled else { return }
             document = lyrics
             displayedTrackID = trackID
             readings = result
             completedRequest = request
-            message = "已直接從 Spotify 取得歌詞。"
-            if !lyrics.isSynced { message += "這首歌沒有有效時間標記，使用一般閱讀模式。" }
+            needsLogin = false
+            message = lyrics.isSynced ? "" : "此歌曲不支援逐句同步"
         } catch {
             guard generation == requestID, !Task.isCancelled else { return }
-            message = (error as? LyricsError)?.localizedDescription ?? "暫時無法讀取歌詞，請檢查網路或重新登入歌詞來源。"
+            if case LyricsError.authenticationRequired = error { needsLogin = true }
+            message = (error as? LyricsError)?.localizedDescription ?? "暫時無法載入歌詞，請檢查網路後重試。"
         }
+    }
+
+    func loginDidChange() {
+        generation = UUID()
+        completedRequest = nil
+        needsLogin = false
+        document = nil
+        readings = [:]
+        displayedTrackID = nil
+        loading = false
     }
 }

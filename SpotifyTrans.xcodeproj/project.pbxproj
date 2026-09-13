@@ -400,7 +400,7 @@
 				DEVELOPMENT_TEAM = 3H7L6HB478;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpotifyTransWidgets/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "SpotifyTrans 歌詞";
+				INFOPLIST_KEY_CFBundleDisplayName = "Lyriva 歌詞";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -426,7 +426,7 @@
 				DEVELOPMENT_TEAM = 3H7L6HB478;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpotifyTransWidgets/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "SpotifyTrans 歌詞";
+				INFOPLIST_KEY_CFBundleDisplayName = "Lyriva 歌詞";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.4;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -577,6 +577,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpotifyTrans/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Lyriva;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -611,6 +612,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = SpotifyTrans/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Lyriva;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

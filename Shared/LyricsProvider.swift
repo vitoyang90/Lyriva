@@ -26,7 +26,7 @@ struct LyricsDocument: Sendable {
         }
         let response = try JSONDecoder().decode(Response.self, from: data)
         guard !response.error, let entries = response.lines, !entries.isEmpty else {
-            throw LyricsError.message("這首歌暫時沒有歌詞，請稍後重試。")
+            throw LyricsError.message("此歌曲尚無歌詞。")
         }
         let lines = entries.enumerated().map {
             Line(id: $0.offset, words: $0.element.words, startTimeMS: $0.element.startTimeMs.flatMap(Double.init))
@@ -40,5 +40,11 @@ struct LyricsDocument: Sendable {
 
 enum LyricsError: LocalizedError {
     case message(String)
-    var errorDescription: String? { if case let .message(text) = self { return text }; return nil }
+    case authenticationRequired
+    var errorDescription: String? {
+        switch self {
+        case .message(let text): return text
+        case .authenticationRequired: return "請至設定完成 Spotify 歌詞登入。"
+        }
+    }
 }

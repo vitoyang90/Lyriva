@@ -1,58 +1,86 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var spotify = SpotifyConnection()
-    @StateObject private var phoneLyrics = PhoneLyricsStore()
+    @StateObject private var spotify: SpotifyConnection
+    @StateObject private var phoneLyrics: PhoneLyricsStore
     @StateObject private var widgetPublisher = WidgetSnapshotPublisher()
     @State private var settingsShown = false
+    @State private var loginShown = false
+    @State private var checkedSavedLogin = false
     @State private var loginRevision = 0
     @Environment(\.scenePhase) private var scenePhase
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                HStack(spacing: 10) {
-                    Image(systemName: "waveform").font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(Studio.accent).frame(width: 40, height: 40)
-                        .background(Studio.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 13))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("SpotifyTrans").font(.system(.headline, design: .rounded, weight: .bold))
-                        Text("MUSIC BEYOND WORDS").font(.system(size: 8, weight: .medium, design: .monospaced))
-                            .tracking(1.6).foregroundStyle(Studio.muted)
-                    }
-                    Spacer()
-                    IconButton(symbol: "slider.horizontal.3", label: "連線與設定") { settingsShown = true }
-                }
-                VStack(alignment: .leading, spacing: 9) {
-                    Text("聽見世界，跟著唱。")
-                        .font(.system(.largeTitle, design: .rounded, weight: .bold)).tracking(-1.2)
-                        .minimumScaleFactor(0.8)
-                    Text("每一種語言，都有你的聲音。")
-                        .font(.subheadline).foregroundStyle(Studio.muted)
-                }.padding(.top, 4)
-                SpotifyConnectionView(spotify: spotify, starter: spotify.playbackStarter) { settingsShown = true }
-                SyncedLyricsView(spotify: spotify, store: phoneLyrics, loginRevision: loginRevision) {
-                    settingsShown = true
-                }
-                if let error = widgetPublisher.error {
-                    Text(error).font(.caption).foregroundStyle(Studio.muted)
-                }
-                HStack(spacing: 6) {
-                    Image(systemName: "iphone")
-                    Text("裝置端轉寫 · 不保存歷史歌詞")
-                }
-                .font(.system(size: 10)).foregroundStyle(Studio.muted)
-                .frame(maxWidth: .infinity).padding(.top, 4).padding(.bottom, 14)
-            }
-            .padding(.horizontal, 22).padding(.top, 18)
-            .frame(maxWidth: 620)
-            .frame(maxWidth: .infinity)
+    private let publishesWidgets: Bool
+
+    init() {
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--landscape-ui-fixture") {
+            _spotify = StateObject(wrappedValue: LandscapeUITestFixture.connection())
+            _phoneLyrics = StateObject(wrappedValue: PhoneLyricsStore(fetch: { _ in LandscapeUITestFixture.document }))
+            publishesWidgets = false
+            return
         }
-        .scrollIndicators(.hidden)
-        .background(Studio.background.ignoresSafeArea())
+        #endif
+        _spotify = StateObject(wrappedValue: SpotifyConnection())
+        _phoneLyrics = StateObject(wrappedValue: PhoneLyricsStore())
+        publishesWidgets = true
+    }
+
+    var body: some View {
+        NavigationStack {
+            GeometryReader { geometry in
+                let landscape = geometry.size.width > geometry.size.height && geometry.size.width >= 600
+                let layout = landscape
+                    ? AnyLayout(HStackLayout(alignment: .top, spacing: 24))
+                    : AnyLayout(VStackLayout(alignment: .leading, spacing: 28))
+                ScrollView(landscape ? [] : .vertical) {
+                    layout {
+                        Group {
+                            if landscape {
+                                ScrollView {
+                                    playerColumn(compact: true)
+                                }.scrollIndicators(.hidden)
+                            } else {
+                                playerColumn(compact: false)
+                            }
+                        }
+                        .frame(width: landscape ? min(320, max(260, geometry.size.width * 0.34)) : nil)
+                        if spotify.connected || landscape {
+                            SyncedLyricsView(spotify: spotify, store: phoneLyrics, loginRevision: loginRevision,
+                                             landscape: landscape) { loginShown = true }
+                                .frame(maxWidth: .infinity, maxHeight: landscape ? .infinity : nil, alignment: .top)
+                        }
+                    }
+                    .padding(.horizontal, landscape ? 16 : 22)
+                    .padding(.top, landscape ? 8 : 18)
+                    .padding(.bottom, landscape ? 8 : 24)
+                    .frame(maxWidth: landscape ? .infinity : 620)
+                    .frame(height: landscape ? geometry.size.height : nil, alignment: .top)
+                    .frame(maxWidth: .infinity)
+                }
+                .scrollIndicators(.hidden)
+                .accessibilityIdentifier(landscape ? "landscape-player" : "portrait-player")
+            }
+            .background(Studio.background.ignoresSafeArea())
+            .navigationTitle("Lyriva")
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(isPresented: $settingsShown) {
+                ConnectionSettingsView(spotify: spotify, lyrics: phoneLyrics) {
+                    phoneLyrics.loginDidChange()
+                    loginRevision += 1
+                }
+            }
+        }
         .foregroundStyle(Studio.ink).tint(Studio.accent).preferredColorScheme(.dark)
-        .sheet(isPresented: $settingsShown) {
-            ConnectionSettingsView(spotify: spotify) { loginRevision += 1 }
-                .presentationDragIndicator(.visible)
+        .fullScreenCover(isPresented: $loginShown) {
+            SpotifyLoginView(spotify: spotify, lyrics: phoneLyrics) {
+                phoneLyrics.loginDidChange()
+                loginRevision += 1
+            }
+        }
+        .onAppear {
+            guard !checkedSavedLogin else { return }
+            checkedSavedLogin = true
+            loginShown = !spotify.connected || spotify.requiresReauthorization
         }
         .onOpenURL { url in
             if url.scheme == "spotifytrans", url.host == "lyrics" {
@@ -65,13 +93,13 @@ struct ContentView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             spotify.playbackStarter.sceneChanged(phase)
-            if phase != .active { widgetPublisher.update(spotify: spotify, lyrics: phoneLyrics, force: true) }
+            if publishesWidgets, phase != .active { widgetPublisher.update(spotify: spotify, lyrics: phoneLyrics, force: true) }
         }
         .onChange(of: spotify.connected) { _, connected in
-            if !connected { widgetPublisher.clear() }
+            if publishesWidgets, !connected { widgetPublisher.clear() }
         }
         .task(id: scenePhase == .active) {
-            guard scenePhase == .active else { return }
+            guard publishesWidgets, scenePhase == .active else { return }
             while !Task.isCancelled {
                 widgetPublisher.update(spotify: spotify, lyrics: phoneLyrics)
                 do { try await Task.sleep(for: .seconds(1)) } catch { return }
@@ -84,6 +112,24 @@ struct ContentView: View {
                 await spotify.refresh(showActivity: false)
                 do { try await Task.sleep(for: .seconds(5)) }
                 catch { return }
+            }
+        }
+    }
+
+    private func playerColumn(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compact ? 10 : 28) {
+            HStack(spacing: 10) {
+                Image("LyrivaMark").resizable().scaledToFit()
+                    .frame(width: compact ? 28 : 40, height: compact ? 28 : 40)
+                    .clipShape(RoundedRectangle(cornerRadius: compact ? 8 : 12))
+                    .accessibilityHidden(true)
+                Text("Lyriva").font(.system(.headline, design: .rounded, weight: .bold))
+                Spacer()
+                IconButton(symbol: "slider.horizontal.3", label: "設定") { settingsShown = true }
+            }
+            SpotifyConnectionView(spotify: spotify, starter: spotify.playbackStarter, compact: compact) { loginShown = true }
+            if let error = widgetPublisher.error {
+                Text(error).font(.caption).foregroundStyle(Studio.muted)
             }
         }
     }

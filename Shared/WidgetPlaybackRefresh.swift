@@ -60,7 +60,7 @@ struct WidgetPlaybackRefresh {
             song.playback = WidgetSongSnapshot.plan(track: state.track, document: document, readings: readings,
                                                      sampledAt: state.sampledAt, position: state.positionMS)
         }
-        if document == nil { song.notice = "暫時無法取得這首歌的歌詞" }
+        if document == nil { song.notice = "暫無歌詞" }
         if previous?.trackID == id { song.artwork = previous?.artwork }
         if song.artwork == nil, let url = state.track.smallArtworkURL { song.artwork = await artwork(url) }
         try Task.checkCancellation()

@@ -147,6 +147,38 @@ struct WidgetPlaybackRefreshTests {
         await #expect(throws: AuthorizationError.self) { try await auth.validSession() }
         #expect(try store.read() == original)
     }
+    @Test @MainActor func expiredRefreshTokenRequiresAuthorizationWithoutRepeatedRequests() async throws {
+        let original = credential(expired: true)
+        let store = MemorySessionStorage(value: original)
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var requests = 0
+        WidgetAuthProtocol.handler = { _ in
+            requests += 1
+            return (400, [:], Data(#"{"error":"invalid_grant"}"#.utf8))
+        }
+        let auth = SpotifyAuthorization(store: store, session: mockSession(), lockDirectory: directory)
+        let connection = SpotifyConnection(sessionStorage: store, authorization: auth)
+        await connection.refresh()
+        #expect(connection.requiresReauthorization)
+        #expect(connection.connected)
+        #expect(try store.read()?.refreshToken == original.refreshToken)
+        #expect(try store.read()?.needsAuthorization == true)
+        await connection.refresh()
+        await #expect(throws: AuthorizationError.self) { try await auth.validSession() }
+        #expect(requests == 1)
+        #expect(SpotifyConnection(sessionStorage: store).requiresReauthorization)
+    }
+
+    @Test func legacySavedSessionRemainsDecodable() throws {
+        let original = credential(expired: false)
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        object.removeValue(forKey: "needsAuthorization")
+        let decoded = try JSONDecoder().decode(SpotifySession.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(decoded == original)
+        #expect(decoded.needsAuthorization != true)
+    }
+
     @Test func widgetHTTPClientRefreshes401AndRespectsRateLimit() async throws {
         let store = MemorySessionStorage(value: credential(expired: false))
         let directory = try temporaryDirectory()

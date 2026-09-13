@@ -18,7 +18,7 @@ struct LyricsWidgetProvider: TimelineProvider {
     }
 
     static var preview: LyricsWidgetEntry {
-        LyricsWidgetEntry(date: Date(), song: WidgetSongSnapshot(trackID: "preview", title: "每一種語言，都有你的聲音", artist: "SpotifyTrans",
+        LyricsWidgetEntry(date: Date(), song: WidgetSongSnapshot(trackID: "preview", title: "範例歌曲", artist: "Lyriva",
             original: "世界", romanization: "sekai", nextOriginal: "未来", nextRomanization: "mirai", updatedAt: Date()))
     }
 }
@@ -29,8 +29,8 @@ struct SpotifyTransLyricsWidget: Widget {
         StaticConfiguration(kind: WidgetSongSnapshot.kind, provider: LyricsWidgetProvider()) { entry in
             LyricsWidgetView(entry: entry)
         }
-        .configurationDisplayName("SpotifyTrans 歌詞")
-        .description("依歌曲時間軸預排歌詞，並於系統允許時重新取得目前歌曲。更新可能延遲。")
+        .configurationDisplayName("Lyriva 歌詞")
+        .description("在主畫面查看歌詞與羅馬字。更新可能延遲。")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }

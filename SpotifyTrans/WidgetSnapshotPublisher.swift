@@ -77,7 +77,7 @@ final class WidgetSnapshotPublisher: ObservableObject {
             hasCleared = false
             error = nil
             WidgetCenter.shared.reloadTimelines(ofKind: WidgetSongSnapshot.kind)
-        } catch { self.error = "小工具資料無法更新，請確認 App 與小工具的 App Groups 簽署設定。" }
+        } catch { self.error = "小工具更新失敗，請稍後再試。" }
     }
 
     func clear() {
@@ -92,6 +92,6 @@ final class WidgetSnapshotPublisher: ObservableObject {
             hasCleared = true
             error = nil
             WidgetCenter.shared.reloadTimelines(ofKind: WidgetSongSnapshot.kind)
-        } catch { self.error = "小工具資料無法清除，請確認 App Groups 設定。" }
+        } catch { self.error = "小工具資料清除失敗，請重新開啟 App。" }
     }
 }

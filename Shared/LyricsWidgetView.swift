@@ -37,13 +37,13 @@ struct LyricsWidgetView: View {
                     Spacer(minLength: 0)
                 }
                 if entry.isExpired || song.isExpired(at: entry.date) {
-                    Text("等待歌曲更新")
+                    Text("待更新")
                         .font(.system(size: small ? 15 : 21, weight: .semibold, design: .rounded))
-                    Text("點一下可回 App 立即校正").font(.caption).foregroundStyle(accent)
+                    Text("點一下開啟 App 更新").font(.caption).foregroundStyle(accent)
                     Spacer(minLength: 0)
                 } else {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(song.original.flatMap { $0.isEmpty ? nil : $0 } ?? (song.notice ?? (entry.isPredicted ? "♪" : "暫時沒有歌詞")))
+                        Text(song.original.flatMap { $0.isEmpty ? nil : $0 } ?? (song.notice ?? (entry.isPredicted ? "♪" : "暫無歌詞")))
                             .font(.system(size: small ? 15 : 20, weight: .semibold, design: .rounded))
                             .lineLimit(family == .systemMedium ? 1 : 2).minimumScaleFactor(0.85)
                         if let reading = song.romanization, !reading.isEmpty {
@@ -54,7 +54,7 @@ struct LyricsWidgetView: View {
                     if family == .systemLarge, let next = song.nextOriginal, !next.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Rectangle().fill(.white.opacity(0.1)).frame(height: 1).padding(.vertical, 6)
-                            Text("下一句預覽").font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.45))
+                            Text("下一句").font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.45))
                             Text(next).font(.system(size: 18, weight: .medium, design: .rounded)).foregroundStyle(.white.opacity(0.7)).lineLimit(2)
                             if let reading = song.nextRomanization { Text(reading).font(.subheadline).foregroundStyle(accent.opacity(0.7)).lineLimit(2) }
                         }
@@ -63,7 +63,7 @@ struct LyricsWidgetView: View {
                 }
                 HStack(spacing: 4) {
                     Image(systemName: "clock").foregroundStyle(accent)
-                    Text(entry.isPredicted ? "預估進度" : "最近同步").lineLimit(1)
+                    Text(entry.isPredicted ? "預估進度" : "更新於").lineLimit(1)
                     Text(song.updatedAt, style: .time).monospacedDigit().lineLimit(1)
                     Spacer(minLength: 0)
                     if !small { Image(systemName: "arrow.up.right") }
@@ -71,9 +71,9 @@ struct LyricsWidgetView: View {
             } else {
                 Image(systemName: "waveform").font(.system(size: 23, weight: .bold)).foregroundStyle(accent)
                 Spacer(minLength: 0)
-                Text("把歌詞，\n留在主畫面。")
+                Text("尚無歌曲")
                     .font(.system(size: small ? 19 : 25, weight: .bold, design: .rounded))
-                Text("點一下連接 Spotify").font(.caption).foregroundStyle(accent)
+                Text("開啟 App 開始播放").font(.caption).foregroundStyle(accent)
                 Spacer(minLength: 0)
             }
         }

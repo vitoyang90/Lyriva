@@ -33,7 +33,16 @@ struct IconButton: View {
                 .frame(width: 46, height: 46)
                 .background(Studio.raised, in: Circle())
         }
-        .buttonStyle(.plain).foregroundStyle(Studio.ink).accessibilityLabel(label)
+        .buttonStyle(StudioIconButtonStyle()).foregroundStyle(Studio.ink).accessibilityLabel(label)
+    }
+}
+
+// Polling briefly disables controls. Only a deliberate press changes their
+// appearance; loading feedback is shown separately by the owning view.
+struct StudioIconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }
 
@@ -75,33 +84,64 @@ struct RecordArtwork: View {
     }
 }
 
+enum LyricsTextSize: String, CaseIterable, Identifiable {
+    case small, medium, large
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .small: return "小"
+        case .medium: return "中"
+        case .large: return "大"
+        }
+    }
+    func points(landscape: Bool) -> Double {
+        switch self {
+        case .small: return landscape ? 18 : 20
+        case .medium: return landscape ? 22 : 24
+        case .large: return landscape ? 26 : 30
+        }
+    }
+}
+
 struct ReadingLine: View {
     let original: String
     let reading: String?
+    var translation: String? = nil
     var showOriginal = true
+    var showReading = true
     var active = false
     var size = 24.0
+    var compact = false
     @ScaledMetric(relativeTo: .title2) private var scale = 1.0
     var body: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: compact ? 10 : 14) {
             RoundedRectangle(cornerRadius: 2).fill(active ? Studio.accent : .clear)
                 .frame(width: 3)
-            VStack(alignment: .leading, spacing: 9) {
-                if showOriginal || reading == nil {
+            VStack(alignment: .leading, spacing: compact ? 4 : 9) {
+                // Keep the source readable while optional subtitles are unavailable.
+                if showOriginal || ((!showReading || reading == nil) && translation == nil) {
                     Text(original.isEmpty ? "♪" : original)
-                        .font(.system(size: (reading == nil ? size : size * 0.76) * scale, weight: reading == nil ? .semibold : .regular))
-                        .foregroundStyle(reading == nil ? Studio.ink : Studio.muted)
-                }
-                if let reading {
-                    Text(reading)
-                        .font(.system(size: size * scale, weight: .semibold, design: .rounded))
+                        .font(.system(size: size * scale, weight: .semibold))
                         .foregroundStyle(active ? Studio.accent : Studio.ink)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                if showReading, let reading {
+                    Text(reading)
+                        .font(.system(size: size * 0.76 * scale, weight: .medium, design: .rounded))
+                        .foregroundStyle(Studio.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let translation {
+                    Text(translation)
+                        .font(.system(size: size * 0.82 * scale))
+                        .foregroundStyle(active ? Studio.ink : Studio.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 3)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.vertical, 18).padding(.horizontal, 8)
+        .padding(.vertical, compact ? 10 : 18).padding(.horizontal, 8)
         .background(active ? Studio.accent.opacity(0.045) : .clear, in: RoundedRectangle(cornerRadius: 14))
         .accessibilityAddTraits(active ? [.isSelected] : [])
     }
@@ -112,7 +152,7 @@ struct LanguageMenu: View {
     var body: some View {
         Menu {
             Picker("歌詞語言", selection: $language) {
-                ForEach(LyricsLanguage.allCases) { Text($0 == .japanese ? "日文（含漢字讀音）" : $0.rawValue).tag($0) }
+                ForEach(LyricsLanguage.allCases) { Text($0.rawValue).tag($0) }
             }
         } label: { StudioPill(title: language.rawValue, symbol: "character.bubble") }
         .accessibilityLabel("歌詞語言：\(language.rawValue)")

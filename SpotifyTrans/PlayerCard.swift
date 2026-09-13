@@ -3,15 +3,16 @@ import SwiftUI
 struct SpotifyConnectionView: View {
     @ObservedObject var spotify: SpotifyConnection
     @ObservedObject var starter: SpotifyPlaybackStarter
+    var compact = false
     var openSettings: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: compact ? 8 : 22) {
             HStack {
                 HStack(spacing: 7) {
                     Circle().fill(spotify.connected ? Studio.accent : Studio.muted).frame(width: 6, height: 6)
-                    Text(spotify.connected ? "CONNECTED TO SPOTIFY" : "YOUR PERSONAL SING-ALONG")
-                        .font(.system(size: 10, weight: .bold, design: .monospaced)).tracking(1)
+                    Text(spotify.requiresReauthorization ? "需要重新授權" : (spotify.connected ? "已連接 Spotify" : "Spotify"))
+                        .font(.caption.weight(.medium))
                 }.foregroundStyle(Studio.muted)
                 Spacer()
                 ProgressView().tint(Studio.accent).scaleEffect(0.8)
@@ -19,13 +20,15 @@ struct SpotifyConnectionView: View {
                     .opacity((spotify.showingActivity || starter.isStarting) ? 1 : 0)
                     .accessibilityHidden(!spotify.showingActivity && !starter.isStarting)
             }
-            HStack(alignment: .center, spacing: 20) {
+            HStack(alignment: .center, spacing: compact ? 12 : 20) {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(spotify.track?.name ?? (spotify.connected ? "準備好下一首。" : "喜歡的歌，\n一起唱。"))
-                        .font(.system(.title2, design: .rounded, weight: .bold))
+                    Text(spotify.track?.name ?? (spotify.connected ? "尚未播放" : "連接 Spotify"))
+                        .font(.system(compact ? .headline : .title2, design: .rounded, weight: .bold))
+                        .lineLimit(compact ? 2 : nil)
                         .foregroundStyle(Studio.ink).fixedSize(horizontal: false, vertical: true)
-                    Text(spotify.track?.artists.map(\.name).joined(separator: " · ") ?? "原文與羅馬字，讓發音不再陌生。")
-                        .font(.subheadline).foregroundStyle(Studio.muted).lineSpacing(4)
+                    Text(spotify.track?.artists.map(\.name).joined(separator: " · ") ?? (spotify.connected ? "播放歌曲後顯示歌詞" : "查看目前歌曲與羅馬字歌詞"))
+                        .font(compact ? .caption : .subheadline).foregroundStyle(Studio.muted).lineSpacing(4)
+                        .lineLimit(compact ? 1 : nil)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 AsyncImage(url: spotify.track?.artworkURL) { phase in
@@ -35,14 +38,14 @@ struct SpotifyConnectionView: View {
                         RecordArtwork()
                     }
                 }
-                .frame(width: 108, height: 108)
+                .frame(width: compact ? 52 : 108, height: compact ? 52 : 108)
                 .clipShape(RoundedRectangle(cornerRadius: 20))
                 .accessibilityLabel(spotify.track.map { "\($0.name) 的專輯封面" } ?? "唱片圖案")
             }
             if spotify.connected {
                 PlaybackTimeline(spotify: spotify, starter: starter, trackID: spotify.track?.id)
                     .id(spotify.track?.id)
-                HStack(spacing: 12) {
+                HStack(spacing: compact ? 4 : 12) {
                     IconButton(symbol: "arrow.clockwise", label: "更新目前歌曲") { Task { await spotify.refresh() } }
                     Spacer(minLength: 0)
                     Button { Task { await spotify.control(.previous) } } label: {
@@ -51,7 +54,7 @@ struct SpotifyConnectionView: View {
                     Button { Task { await spotify.control(spotify.isPlaying ? .pause : .play) } } label: {
                         Image(systemName: spotify.isPlaying ? "pause.fill" : "play.fill")
                             .font(.system(size: 23, weight: .semibold))
-                            .foregroundStyle(Studio.background).frame(width: 64, height: 64)
+                            .foregroundStyle(Studio.background).frame(width: compact ? 48 : 64, height: compact ? 48 : 64)
                             .background(Studio.accent, in: Circle())
                     }.accessibilityLabel(spotify.isPlaying ? "暫停" : "播放")
                     Button { Task { await spotify.control(.next) } } label: {
@@ -59,13 +62,12 @@ struct SpotifyConnectionView: View {
                     }.accessibilityLabel("下一首")
                     Spacer(minLength: 0)
                 }
-                .buttonStyle(PlaybackControlButtonStyle()).foregroundStyle(Studio.ink)
-                .disabled(spotify.busy || starter.isStarting).opacity((spotify.showingActivity || starter.isStarting) ? 0.55 : 1)
+                .buttonStyle(StudioIconButtonStyle()).foregroundStyle(Studio.ink)
+                .disabled(spotify.busy || starter.isStarting || spotify.requiresReauthorization)
                 Text(starter.message ?? spotify.status).font(.caption).foregroundStyle(Studio.muted)
-                    .lineLimit(2, reservesSpace: true)
-                if spotify.track == nil {
-                    Text("按播放以開啟 Spotify，接續上次播放後返回這裡。")
-                        .font(.caption).foregroundStyle(Studio.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                if spotify.requiresReauthorization {
+                    Button("更新 Spotify 授權", action: openSettings).buttonStyle(StudioButton())
                 }
                 if let url = spotify.track?.external_urls.spotify {
                     Link(destination: url) {
@@ -78,7 +80,7 @@ struct SpotifyConnectionView: View {
                 }.buttonStyle(StudioButton(prominent: true))
             }
         }
-        .padding(24)
+        .padding(compact ? 14 : 24)
         .background(Studio.surface, in: RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Studio.ink.opacity(0.07)))
     }
@@ -144,14 +146,5 @@ private struct PlaybackTimeline: View {
     private func time(_ ms: Double) -> String {
         let seconds = Int(max(0, ms) / 1000)
         return String(format: "%d:%02d", seconds / 60, seconds % 60)
-    }
-}
-
-// Silent polling briefly disables controls. Keep their appearance stable instead
-// of letting the system's plain style dim them on every playback refresh.
-private struct PlaybackControlButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .opacity(configuration.isPressed ? 0.7 : 1)
     }
 }

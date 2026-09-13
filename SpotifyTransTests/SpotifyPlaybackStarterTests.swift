@@ -53,7 +53,7 @@ struct SpotifyPlaybackStarterTests {
         starter.start(clientID: "test-client")
         starter.returnedWithoutCallback()
         #expect(!starter.isStarting)
-        #expect(starter.message?.contains("未收到") == true)
+        #expect(starter.message?.contains("無法確認播放狀態") == true)
     }
 
     @Test func lateLaunchCompletionCannotOverwriteNewAttempt() async {

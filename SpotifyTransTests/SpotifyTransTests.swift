@@ -52,6 +52,42 @@ struct SpotifyTransTests {
         #expect(engine.convert("Hello world", language: .japanese)[0].romanization == nil)
     }
 
+    @Test func smallTsuJoinsConsonantsAcrossTokenizerBoundaries() {
+        let engine = LyricsRomanizer()
+        for (source, expected) in [
+            ("しまった", "shimatta"), ("まって", "matte"), ("きっぷ", "kippu"),
+            ("がっこう", "gakkou"), ("マッチ", "matchi"), ("つき", "tsuki"),
+            ("ｼﾏｯﾀ", "shimatta"), ("あっ", "a’"), ("っ", "’"),
+            ("まっ、て", "ma’、te"), ("Hello しまった WORLD", "Hello shimatta WORLD"),
+            ("~tsu しまった", "~tsu shimatta"), ("エキを", "eki o")
+        ] {
+            #expect(engine.convert(source, language: .japanese)[0].romanization == expected)
+        }
+        let source = "使いすぎってしまったエキを"
+        let result = engine.convert(source, language: .japanese)[0]
+        #expect(result.original == source)
+        #expect(result.romanization == "tsukai sugi tte shimatta eki o")
+    }
+
+    @Test func unresolvedSmallTsuUsesFollowingConsonantWithoutRemovingFullTsu() {
+        for (source, expected) in [
+            ("shima~tsu ta", "shimatta"), ("ma ~tsu te", "matte"),
+            ("ma~tsu chi", "matchi"), ("a~tsu shuku", "asshuku"),
+            ("yo~tsu tsu", "yottsu"), ("tsu", "tsu"), ("a~tsu", "a’")
+        ] {
+            #expect(LyricsRomanizer.normalizeSokuon(source) == expected)
+        }
+    }
+
+    @MainActor @Test func smallTsuCorrectionReachesPhoneLyricsWithoutChangingSource() async {
+        let store = PhoneLyricsStore(fetch: { _ in
+            LyricsDocument(lines: [.init(id: 42, words: "しまったエキを", startTimeMS: 1000)], isSynced: true)
+        })
+        await store.load(trackID: Self.trackID, language: .japanese)
+        #expect(store.readings[42] == "shimatta eki o")
+        #expect(store.document?.lines.first?.words == "しまったエキを")
+    }
+
     @Test func mixedLanguageLinesKeepEnglishAndConvertJapanese() {
         let cases = [
             ("I just want to stay with you forever ありがとう", "I just want to stay with you forever arigatou"),
@@ -208,7 +244,7 @@ struct SpotifyTransTests {
         let spotify = SpotifyConnection(restoreSession: false)
         try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
         let lastSuccessfulSync = spotify.lastPlaybackSync
-        for status in [500, 429, 200] {
+        for status in [500, 429, 401, 200] {
             do {
                 try spotify.applyPlaybackResponse(data: Data("invalid".utf8), response: Self.playbackResponse(status))
                 Issue.record("Expected a failed playback response")
@@ -224,12 +260,12 @@ struct SpotifyTransTests {
         try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
         #expect(spotify.track?.id == "song-a")
         #expect(spotify.playbackPosition(at: Date().addingTimeInterval(1))! > 1900)
-        #expect(spotify.status == "正在 Spotify 播放")
+        #expect(spotify.status == "播放中")
     }
 
-    @MainActor @Test func confirmedNoPlaybackAndLostAuthorizationStillClearSong() throws {
+    @MainActor @Test func confirmedNoPlaybackStillClearsSong() throws {
         let spotify = SpotifyConnection(restoreSession: false)
-        for status in [204, 401] {
+        for status in [204] {
             try spotify.applyPlaybackResponse(data: Self.playbackData, response: Self.playbackResponse(200))
             try spotify.applyPlaybackResponse(data: Data(), response: Self.playbackResponse(status))
             #expect(spotify.track == nil)
@@ -278,10 +314,52 @@ struct SpotifyTransTests {
         #expect(document.lines.first?.words == "hello")
     }
 
+    @Test func expiredLyricsAccessTokenRefreshesUsingSavedCookie() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [LyricsMockProtocol.self]
+        var tokenRequests = 0
+        var lyricRequests = 0
+        LyricsMockProtocol.handler = { request in
+            if request.url?.host == "raw.githubusercontent.com" { return (200, Data(#"{"1":[1,2,3]}"#.utf8)) }
+            if request.url?.path == "/api/server-time" { return (200, Data(#"{"serverTime":1700000000}"#.utf8)) }
+            if request.url?.path == "/api/token" {
+                tokenRequests += 1
+                #expect(request.value(forHTTPHeaderField: "Cookie") == "sp_dc=saved-cookie")
+                return (200, try! JSONSerialization.data(withJSONObject: [
+                    "accessToken": "token-\(tokenRequests)",
+                    "accessTokenExpirationTimestampMs": Date().addingTimeInterval(600).timeIntervalSince1970 * 1000,
+                    "isAnonymous": false
+                ]))
+            }
+            lyricRequests += 1
+            if lyricRequests == 1 { return (401, Data()) }
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer token-2")
+            return (200, Data(#"{"lyrics":{"syncType":"LINE_SYNCED","lines":[{"startTimeMs":"1000","words":"hello"}]}}"#.utf8))
+        }
+        let client = DirectLyricsClient(session: URLSession(configuration: config), cookie: { "saved-cookie" })
+        #expect(try await client.fetch(trackID: Self.trackID).lines.first?.words == "hello")
+        #expect(tokenRequests == 2)
+        #expect(lyricRequests == 2)
+    }
+
+    @Test @MainActor func onlyConfirmedLyricsAuthenticationFailureRequestsLogin() async {
+        let store = PhoneLyricsStore(fetch: { id in
+            if id == "expired" { throw LyricsError.authenticationRequired }
+            throw URLError(.notConnectedToInternet)
+        })
+        await store.load(trackID: "offline", language: .automatic)
+        #expect(!store.needsLogin)
+        await store.load(trackID: "expired", language: .automatic)
+        #expect(store.needsLogin)
+        store.loginDidChange()
+        #expect(!store.needsLogin)
+        #expect(store.document == nil)
+    }
+
     @Test func directSourceHTTPFailures() async throws {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [LyricsMockProtocol.self]
-        for (status, fragment) in [(401, "授權被拒絕"), (404, "找不到"), (429, "限制請求")] {
+        for (status, fragment) in [(404, "尚無歌詞"), (429, "過於頻繁")] {
             LyricsMockProtocol.handler = { _ in (status, Data()) }
             let client = DirectLyricsClient(session: URLSession(configuration: config), cookie: { "test-cookie" })
             do {

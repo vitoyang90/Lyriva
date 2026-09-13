@@ -39,13 +39,14 @@ struct SharedKeychain {
 }
 
 enum AuthorizationError: LocalizedError {
-    case storage, signedOut, busy, response(Int)
+    case storage, signedOut, reauthorizationRequired, busy, response(Int)
     var errorDescription: String? {
         switch self {
-        case .storage: return "無法存取共享登入，請確認 App Groups 簽署設定。"
+        case .storage: return "無法存取登入資料，請重新開啟 App 後再試。"
         case .signedOut: return "請重新連接 Spotify。"
-        case .busy: return "登入資料正在更新，請稍後重試。"
-        case .response(let code): return "Spotify 授權暫時無法更新（\(code)），請稍後重試。"
+        case .reauthorizationRequired: return "Spotify 授權已到期，請至設定重新授權。"
+        case .busy: return "正在更新連線，請稍後再試。"
+        case .response: return "暫時無法更新連線，請稍後再試。"
         }
     }
 }
@@ -83,6 +84,7 @@ struct SpotifySession: Codable, Equatable, Sendable {
     var accessToken: String
     var refreshToken: String
     var expiresAt: Date
+    var needsAuthorization: Bool? = nil
 }
 
 protocol SpotifySessionStorage: Sendable {
@@ -129,15 +131,26 @@ actor SpotifyAuthorization {
     }
     func validSession() async throws -> SpotifySession {
         guard let saved = try store.read() else { throw AuthorizationError.signedOut }
+        guard saved.needsAuthorization != true else { throw AuthorizationError.reauthorizationRequired }
         if saved.expiresAt > Date() { return saved }
         let lock = try SharedFileLock(name: "authorization-refresh.lock", directory: lockDirectory)
         try await lock.acquire()
         defer { withExtendedLifetime(lock) {} }
         // Re-read after waiting: the other process may have rotated the refresh token.
         guard var current = try store.read(), current.id == saved.id else { throw AuthorizationError.signedOut }
+        guard current.needsAuthorization != true else { throw AuthorizationError.reauthorizationRequired }
         if current.expiresAt > Date() { return current }
-        let tokens = try await request(["grant_type": "refresh_token", "refresh_token": current.refreshToken,
-                                        "client_id": current.clientID])
+        let tokens: Tokens
+        do {
+            tokens = try await request(["grant_type": "refresh_token", "refresh_token": current.refreshToken,
+                                       "client_id": current.clientID])
+        } catch AuthorizationError.reauthorizationRequired {
+            try store.update { value in
+                guard value?.id == current.id, value?.refreshToken == current.refreshToken else { return }
+                value?.needsAuthorization = true
+            }
+            throw AuthorizationError.reauthorizationRequired
+        }
         current.accessToken = tokens.access_token
         current.refreshToken = tokens.refresh_token ?? current.refreshToken
         current.expiresAt = Date().addingTimeInterval(tokens.expires_in - 60)
@@ -171,7 +184,14 @@ actor SpotifyAuthorization {
         request.httpBody = Data(body.utf8)
         let (data, response) = try await session.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard code == 200 else { throw AuthorizationError.response(code) }
+        guard code == 200 else {
+            if code == 400, fields["grant_type"] == "refresh_token",
+               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               body["error"] as? String == "invalid_grant" {
+                throw AuthorizationError.reauthorizationRequired
+            }
+            throw AuthorizationError.response(code)
+        }
         let tokens = try JSONDecoder().decode(Tokens.self, from: data)
         guard !tokens.access_token.isEmpty, tokens.expires_in.isFinite, tokens.expires_in > 0 else {
             throw AuthorizationError.signedOut
