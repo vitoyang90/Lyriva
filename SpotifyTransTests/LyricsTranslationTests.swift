@@ -41,7 +41,7 @@ struct LyricsTranslationTests {
             return .supported
         })
         await store.configure(input(texts: ["Je voudrais voyager avec toi dans le monde entier"], language: .automatic), enabled: true)
-        #expect(checked == ["fr"])
+        #expect(checked == ["fr", "fr"])
         #expect(store.missingLanguages == ["fr"])
         #expect(store.configuration == nil)
     }
@@ -53,7 +53,7 @@ struct LyricsTranslationTests {
             return .supported
         })
         await store.configure(input(texts: ["君と歌う", "Stay"], language: .japanese), enabled: true)
-        #expect(checked == ["ja", "en"])
+        #expect(checked == ["ja", "ja", "en", "en"])
         #expect(store.missingLanguages == ["ja", "en"])
         #expect(store.configuration == nil)
         #expect(!store.loading)
@@ -87,12 +87,208 @@ struct LyricsTranslationTests {
         #expect(store.configuration?.source?.languageCode?.identifier == "ja")
     }
 
+    @Test func transientModelStatusRecoversBeforeOfferingDownload() async {
+        var checks = 0
+        let store = LyricsTranslationStore(availabilityCheck: { _ in
+            checks += 1
+            return checks == 1 ? .supported : .installed
+        }, availabilityRetryDelay: .zero)
+        await store.configure(input(texts: ["君と歌う"], language: .japanese), enabled: true)
+        #expect(checks == 2)
+        #expect(store.missingLanguages.isEmpty)
+        #expect(store.message == nil)
+        #expect(store.configuration?.source?.languageCode?.identifier == "ja")
+    }
+
+    @Test func missingModelRefreshResumesWithoutNavigationAndKeepsCompletedLyrics() async {
+        var japaneseInstalled = false
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            code == "en" || japaneseInstalled ? .installed : .supported
+        }, availabilityRetryDelay: .zero)
+        let song = input(texts: ["君と歌う", "Hello"], language: .japanese)
+        await store.configure(song, enabled: true)
+        await store.translate(song) { requests in
+            #expect(requests.allSatisfy { $0.sourceLanguage == "en" })
+            return requests.map { .init(id: $0.id, source: $0.text, text: "你好") }
+        }
+        #expect(store.translations == [17: "你好"])
+        #expect(store.missingLanguages == ["ja"])
+        japaneseInstalled = true
+        await store.refreshMissingModels(song)
+        #expect(store.translations == [17: "你好"])
+        #expect(store.missingLanguages.isEmpty)
+        #expect(store.message == nil)
+        #expect(store.configuration?.source?.languageCode?.identifier == "ja")
+        await store.translate(song) { requests in
+            #expect(requests.allSatisfy { $0.sourceLanguage == "ja" })
+            return requests.map { .init(id: $0.id, source: $0.text, text: "與你歌唱") }
+        }
+        #expect(store.translations == [7: "與你歌唱", 17: "你好"])
+        #expect(!store.loading)
+        #expect(store.message == nil)
+    }
+
+    @Test func genuinelyMissingModelStaysUnavailableAfterRefresh() async {
+        let store = LyricsTranslationStore(availabilityCheck: { _ in .supported }, availabilityRetryDelay: .zero)
+        let song = input(texts: ["君と歌う"], language: .japanese)
+        await store.configure(song, enabled: true)
+        await store.refreshMissingModels(song)
+        #expect(store.missingLanguages == ["ja"])
+        #expect(store.configuration == nil)
+        #expect(!store.loading)
+        #expect(store.message == "需要下載日文翻譯模型")
+    }
+
+    @Test func laterMissingLanguageAlsoRecoversAfterEarlierLanguageCompletes() async {
+        var installed = false
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            code == "ja" || installed ? .installed : .supported
+        }, availabilityRetryDelay: .zero)
+        let song = input(texts: ["君と歌う", "Hello"], language: .japanese)
+        await store.configure(song, enabled: true)
+        await store.translate(song) { requests in
+            #expect(requests.allSatisfy { $0.sourceLanguage == "ja" })
+            return requests.map { .init(id: $0.id, source: $0.text, text: "與你歌唱") }
+        }
+        #expect(store.missingLanguages == ["en"])
+        installed = true
+        await store.refreshMissingModels(song)
+        #expect(store.configuration?.source?.languageCode?.identifier == "en")
+        #expect(store.translations == [7: "與你歌唱"])
+    }
+
+    @Test func changingSongsIgnoresLateModelRefresh() async {
+        var resume: CheckedContinuation<LanguageAvailability.Status, Never>?
+        var refreshing = false
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            if code == "en" { return .installed }
+            if refreshing { return await withCheckedContinuation { resume = $0 } }
+            return .supported
+        }, availabilityRetryDelay: .zero)
+        let oldSong = input(texts: ["君と歌う"], language: .japanese)
+        await store.configure(oldSong, enabled: true)
+        refreshing = true
+        let pending = Task { await store.refreshMissingModels(oldSong) }
+        while resume == nil { await Task.yield() }
+        await store.configure(input(track: "new", texts: ["Hello"]), enabled: true)
+        let configuration = store.configuration
+        resume?.resume(returning: .installed)
+        await pending.value
+        #expect(store.configuration == configuration)
+        #expect(store.configuration?.source?.languageCode?.identifier == "en")
+        #expect(store.missingLanguages.isEmpty)
+    }
+
+    @Test func disablingTranslationIgnoresLateModelRefresh() async {
+        var resume: CheckedContinuation<LanguageAvailability.Status, Never>?
+        var refreshing = false
+        let store = LyricsTranslationStore(availabilityCheck: { _ in
+            if refreshing { return await withCheckedContinuation { resume = $0 } }
+            return .supported
+        }, availabilityRetryDelay: .zero)
+        let song = input(texts: ["君と歌う"], language: .japanese)
+        await store.configure(song, enabled: true)
+        refreshing = true
+        let pending = Task { await store.refreshMissingModels(song) }
+        while resume == nil { await Task.yield() }
+        store.cancel()
+        resume?.resume(returning: .installed)
+        await pending.value
+        #expect(store.configuration == nil)
+        #expect(!store.loading)
+    }
+
+    @Test func removedModelsAreNotAssumedInstalledForTheNextSong() async {
+        var installed = true
+        let store = LyricsTranslationStore(availabilityCheck: { _ in installed ? .installed : .supported },
+                                          availabilityRetryDelay: .zero)
+        await store.configure(input(track: "first", texts: ["君と歌う"], language: .japanese), enabled: true)
+        #expect(store.configuration != nil)
+        installed = false
+        await store.configure(input(track: "second", texts: ["君と歌う"], language: .japanese), enabled: true)
+        #expect(store.configuration == nil)
+        #expect(store.missingLanguages == ["ja"])
+    }
+
     private func input(track: String = "song", texts: [String] = ["Hello world", "Good morning"],
-                       language: LyricsLanguage = .other) -> LyricsTranslationInput {
+                       language: LyricsLanguage = .other, sourceLanguage: String? = nil) -> LyricsTranslationInput {
         LyricsTranslationInput(trackID: track,
             document: LyricsDocument(lines: texts.enumerated().map {
                 .init(id: $0.offset * 10 + 7, words: $0.element, startTimeMS: Double($0.offset * 1000))
-            }, isSynced: true), language: language)
+            }, isSynced: true), language: language, sourceLanguage: sourceLanguage)
+    }
+
+    @Test func singleLanguagePreservesOtherFragmentsAndSkipsTheirModels() async {
+        var checked: [String] = []
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            checked.append(code)
+            return code == "ja" ? .installed : .supported
+        })
+        let song = input(texts: ["Hello ありがとう", "Stay", "Hello ありがとう"],
+                         language: .japanese, sourceLanguage: "ja")
+        await store.configure(song, enabled: true)
+        #expect(checked == ["ja"])
+        #expect(store.missingLanguages.isEmpty)
+        await store.translate(song) { requests in
+            #expect(requests.count == 1)
+            #expect(requests.first?.sourceLanguage == "ja")
+            return requests.map { .init(id: $0.id, source: $0.text, text: "謝謝") }
+        }
+        #expect(store.translations == [7: "Hello 謝謝", 27: "Hello 謝謝"])
+        #expect(store.message == nil)
+        await store.configure(song, enabled: true)
+        await store.translate(song) { _ in Issue.record("Completed selection must be reused"); return [] }
+        #expect(checked == ["ja"])
+    }
+
+    @Test func absentSelectedLanguageCompletesWithoutModelsOrRetry() async {
+        let store = LyricsTranslationStore(availabilityCheck: { _ in
+            Issue.record("Unselected languages must not be checked")
+            return .supported
+        })
+        let song = input(texts: ["Hello world", "这是我们的世界，我们一起听音乐"], sourceLanguage: "ja")
+        await store.configure(song, enabled: true)
+        await store.translate(song) { _ in Issue.record("No matching language must not translate"); return [] }
+        #expect(store.translations.isEmpty)
+        #expect(store.configuration == nil)
+        #expect(store.message == nil)
+        #expect(!store.loading)
+    }
+
+    @Test func singleLanguageOnlyReportsSelectedMissingModel() async {
+        let store = LyricsTranslationStore(availabilityCheck: { _ in .supported })
+        await store.configure(input(texts: ["Hello ありがとう"], language: .japanese, sourceLanguage: "ja"), enabled: true)
+        #expect(store.missingLanguages == ["ja"])
+        #expect(store.message == "需要下載日文翻譯模型")
+    }
+
+    @Test func changingTranslationScopeDiscardsLateResults() async {
+        let store = LyricsTranslationStore()
+        let japanese = input(texts: ["Hello ありがとう"], language: .japanese, sourceLanguage: "ja")
+        let english = input(texts: ["Hello ありがとう"], language: .japanese, sourceLanguage: "en")
+        await store.configure(japanese, enabled: true)
+        var resume: CheckedContinuation<[LyricsTranslationStore.Result], Never>?
+        let old = Task {
+            await store.translate(japanese) { _ in await withCheckedContinuation { resume = $0 } }
+        }
+        while resume == nil { await Task.yield() }
+        await store.configure(english, enabled: true)
+        await store.translate(english) { requests in
+            #expect(requests.allSatisfy { $0.sourceLanguage == "en" })
+            return requests.map { .init(id: $0.id, source: $0.text, text: "你好") }
+        }
+        resume?.resume(returning: [.init(id: "7:1", source: "ありがとう", text: "謝謝")])
+        await old.value
+        #expect(store.translations == [7: "你好 ありがとう"])
+        #expect(store.message == nil)
+        let all = input(texts: ["Hello ありがとう"], language: .japanese, sourceLanguage: "")
+        #expect(all.sourceLanguage == nil)
+        await store.configure(all, enabled: true)
+        #expect(store.translations.isEmpty)
+        await store.translate(all) { requests in
+            requests.map { .init(id: $0.id, source: $0.text, text: $0.sourceLanguage == "ja" ? "謝謝" : "你好") }
+        }
+        #expect(store.translations == [7: "你好 謝謝"])
     }
 
     @Test func mixedJapaneseAndEnglishUseSeparateLanguageBatches() async {
@@ -148,6 +344,51 @@ struct LyricsTranslationTests {
         #expect(plan.requests.filter { ["I", "Stay", "Love", "Oh", "Don’t go"].contains($0.text) }.allSatisfy { $0.sourceLanguage == "en" })
         #expect(plan.requests.contains { $0.text == "ハート" && $0.sourceLanguage == "ja" })
         #expect(!plan.groups(excluding: []).contains { $0.source?.languageCode?.identifier == "tr" })
+    }
+
+    @Test func uncertainLongLatinFragmentsUseSongContextWithoutOverridingConfidentLanguages() {
+        let uncertain: [NLLanguage: Double] = [.dutch: 0.48, .english: 0.42]
+        #expect(LyricsTranslationPlan.contextualLatinLanguage(uncertain, letterCount: 35, englishContext: true) == "en")
+        #expect(LyricsTranslationPlan.contextualLatinLanguage(uncertain, letterCount: 35, englishContext: false) == nil)
+        #expect(LyricsTranslationPlan.contextualLatinLanguage([.french: 0.95, .english: 0.05],
+                                                             letterCount: 50, englishContext: true) == "fr")
+    }
+
+    @Test func adamasEndingIsHandledAsEnglishInJapaneseSong() {
+        // Short excerpt for the reported case: https://www.uta-net.com/song/257111/
+        let song = input(texts: ["君と歌う", "It's TiME It's TiME “ADAMAS”"], language: .automatic)
+        let plan = LyricsTranslationPlan(song)
+        #expect(plan.requests.last?.sourceLanguage == "en")
+        #expect(plan.requests.allSatisfy { ["ja", "en"].contains($0.sourceLanguage) })
+    }
+
+    @Test func typographyAndLongVocalRefrainsDoNotCreateUnknownLanguageRequests() {
+        let english = ["Ｈｅｌｌｏ ＷＯＲＬＤ", "Iʼm here", "𝑯𝒆𝒍𝒍𝒐", "Na na na na na na na na na na na na na na"]
+        let song = input(texts: ["君と歌う"] + english + ["ー", "ʼ"], language: .automatic)
+        let plan = LyricsTranslationPlan(song)
+        #expect(plan.requests.filter { $0.sourceLanguage == "en" }.map(\.text) == english)
+        #expect(plan.requests.count == 5)
+        #expect(plan.requests.allSatisfy { ["ja", "en"].contains($0.sourceLanguage) })
+    }
+
+    @Test func mixedTypographyTranslatesWithoutUnknownLanguageWarning() async {
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            #expect(["ja", "en"].contains(code))
+            return .installed
+        })
+        let song = input(texts: ["君と Ｉʼｍ here", "Na na na na na na na na na na na na", "ー"], language: .automatic)
+        await store.configure(song, enabled: true)
+        await store.translate(song) { requests in
+            requests.map { .init(id: $0.id, source: $0.text, text: $0.sourceLanguage == "ja" ? "與你" : "英文譯文") }
+        }
+        #expect(store.translations == [7: "與你 英文譯文", 17: "英文譯文"])
+        #expect(store.message == nil)
+        #expect(store.missingLanguages.isEmpty)
+    }
+
+    @Test func confidentFrenchPassageInJapaneseSongKeepsFrenchModel() {
+        let song = input(texts: ["君と歌う", "Je voudrais voyager avec toi dans le monde entier"], language: .automatic)
+        #expect(LyricsTranslationPlan(song).requests.last?.sourceLanguage == "fr")
     }
 
     @Test func chinesePartsInMixedSongsAreConvertedWithoutBeingSentToEnglishSession() async {

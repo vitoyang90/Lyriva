@@ -17,6 +17,34 @@ struct WidgetSongSnapshot: Codable, Equatable, Sendable {
     var playbackEndsAt: Date?
     var notice: String?
     var authorizationID: UUID?
+    var isPlaying: Bool?
+    var controlError: String?
+    var needsPlaybackRefresh: Bool?
+    var needsControlPresentation: Bool?
+    var pendingPlaybackAction: String?
+    // Retain the operation identity after confirmation, including while lyrics load.
+    var controlID: UUID?
+    var controlInFlight: Bool?
+    var durationMS: Int?
+    var positionMS: Double?
+
+    var isControlInFlight: Bool {
+        controlInFlight == true && Date().timeIntervalSince(updatedAt) < 30
+    }
+
+    func acceptsPlayback(_ state: WidgetPlaybackState?, at date: Date) -> Bool {
+        guard let action = pendingPlaybackAction, date.timeIntervalSince(updatedAt) < 10 else { return true }
+        guard let state else { return false }
+        switch action {
+        case "pause": return !state.isPlaying
+        case "play": return state.isPlaying
+        case "next": return state.track.id != trackID
+        case "previous": return state.track.id != trackID || state.positionMS < 1500
+        default: return true
+        }
+    }
+
+    var playbackIsPlaying: Bool { isPlaying ?? (playback?.isValid == true || playbackEndsAt != nil) }
 
     struct PlaybackPlan: Codable, Equatable, Sendable {
         struct Line: Codable, Equatable, Sendable {
@@ -73,8 +101,11 @@ struct WidgetSongSnapshot: Codable, Equatable, Sendable {
 
 struct WidgetSnapshotStorage {
     private let directory: URL?
-    init(directory: URL? = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: WidgetSongSnapshot.appGroup)) {
+    private let sessionStorage: any SpotifySessionStorage
+    init(directory: URL? = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: WidgetSongSnapshot.appGroup),
+         sessionStorage: any SpotifySessionStorage = KeychainSessionStorage()) {
         self.directory = directory
+        self.sessionStorage = sessionStorage
     }
     private var file: URL? { directory?.appendingPathComponent("current-song.json") }
     func read() -> WidgetSongSnapshot? {
@@ -94,18 +125,105 @@ struct WidgetSnapshotStorage {
     func write(_ snapshot: WidgetSongSnapshot) throws {
         try locked {
             // Late artwork or a suspended app must not replace a newer playback sample.
-            if let current = read(), current.updatedAt > snapshot.updatedAt { return }
+            if let current = read() {
+                guard snapshot.controlID == current.controlID else { return }
+                if current.updatedAt > snapshot.updatedAt || current.isControlInFlight { return }
+                if current.pendingPlaybackAction != nil, Date().timeIntervalSince(current.updatedAt) < 10 { return }
+            }
             try writeFile(snapshot)
         }
     }
-    func updateFromWidget(_ snapshot: WidgetSongSnapshot?, observedAt: Date, sessionID: UUID) throws -> WidgetSongSnapshot? {
+    func updateFromWidget(_ snapshot: WidgetSongSnapshot?, observedAt: Date, sessionID: UUID,
+                          controlID: UUID? = nil) throws -> WidgetSongSnapshot? {
         try locked {
-            guard try KeychainSessionStorage().read()?.id == sessionID else { return nil }
+            guard try sessionStorage.read()?.id == sessionID else { return nil }
             let current = read()
+            guard current?.controlID == controlID, current?.isControlInFlight != true else { return current }
             if let current, current.updatedAt > (snapshot?.updatedAt ?? observedAt) { return current }
             if let snapshot { try writeFile(snapshot) }
             else { try removeFile() }
             return snapshot
+        }
+    }
+    func updateAfterControl(_ action: WidgetPlaybackAction?, errorMessage: String? = nil,
+                            at date: Date, sessionID: UUID, inFlight: Bool = false) throws {
+        try locked {
+            guard try sessionStorage.read()?.id == sessionID,
+                  var song = read(), song.authorizationID == sessionID else { return }
+            song.controlError = errorMessage
+            song.needsControlPresentation = true
+            if let action {
+                // A newer playback response already knows more than this command.
+                guard song.updatedAt <= date else { return }
+                song = song.lyrics(at: date)
+                if let position = song.positionMS, let duration = song.durationMS, song.playbackIsPlaying {
+                    song.positionMS = min(Double(duration), position + max(0, date.timeIntervalSince(song.updatedAt)) * 1000)
+                }
+                song.playback = nil
+                song.playbackEndsAt = nil
+                song.updatedAt = date
+                song.needsPlaybackRefresh = true
+                song.pendingPlaybackAction = action.rawValue
+                song.controlID = UUID()
+                song.controlInFlight = inFlight
+                switch action {
+                case .toggle: throw WidgetPlaybackControlError.failed // Resolve under the command lock first.
+                case .pause: song.isPlaying = false
+                case .play: song.isPlaying = true
+                case .previous, .next:
+                    song.positionMS = nil
+                    song.original = nil
+                    song.romanization = nil
+                    song.nextOriginal = nil
+                    song.nextRomanization = nil
+                    song.playbackEndsAt = date
+                }
+            }
+            try writeFile(song)
+        }
+    }
+
+    // Only this command may finish its own state. Network/lyrics responses use
+    // updateFromWidget and must also match this identity after the lock is released.
+    func finishControl(controlID: UUID?, state: WidgetPlaybackState?, errorMessage: String?,
+                       sessionID: UUID, fallbackIsPlaying: Bool? = nil) throws {
+        try locked {
+            guard try sessionStorage.read()?.id == sessionID,
+                  var song = read(), song.authorizationID == sessionID,
+                  song.controlID == controlID else { return }
+            if let state, var confirmed = WidgetSongSnapshot.snapshot(track: state.track, document: nil,
+                readings: [:], position: state.positionMS, date: state.sampledAt) {
+                if song.trackID == confirmed.trackID {
+                    confirmed.original = song.original
+                    confirmed.romanization = song.romanization
+                    confirmed.artwork = song.artwork
+                }
+                confirmed.authorizationID = sessionID
+                confirmed.controlID = controlID
+                confirmed.isPlaying = state.isPlaying
+                confirmed.playbackEndsAt = state.endsAt
+                confirmed.needsPlaybackRefresh = true
+                song = confirmed
+            } else if errorMessage != nil, let fallbackIsPlaying {
+                // A rejected toggle must not leave its optimistic icon stuck.
+                // Keep lyrics frozen until the next authoritative playback read.
+                song.isPlaying = fallbackIsPlaying
+                song.pendingPlaybackAction = nil
+            }
+            song.controlInFlight = false
+            song.controlError = errorMessage
+            song.needsControlPresentation = true
+            try writeFile(song)
+        }
+    }
+    func consumeControlPresentation(sessionID: UUID) throws -> WidgetSongSnapshot? {
+        try locked {
+            guard try sessionStorage.read()?.id == sessionID,
+                  var song = read(), song.authorizationID == sessionID,
+                  song.needsControlPresentation == true else { return nil }
+            song.needsControlPresentation = nil
+            try writeFile(song)
+            return song
         }
     }
     private func removeFile() throws {
@@ -113,6 +231,15 @@ struct WidgetSnapshotStorage {
         if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
     }
     func clear() throws { try locked { try removeFile() } }
+
+    func clearPlayback(controlID: UUID?) throws -> Bool {
+        try locked {
+            let current = read()
+            guard current?.controlID == controlID, current?.isControlInFlight != true else { return false }
+            try removeFile()
+            return true
+        }
+    }
 
 }
 
@@ -136,7 +263,7 @@ extension WidgetSongSnapshot {
                                   artist: String(track.artists.map(\.name).joined(separator: " · ").prefix(160)),
                                   original: clipped(line?.words), romanization: clipped(line.flatMap { readings[$0.id] }),
                                   nextOriginal: clipped(next?.words), nextRomanization: clipped(next.flatMap { readings[$0.id] }),
-                                  updatedAt: date)
+                                  updatedAt: date, durationMS: track.duration_ms, positionMS: position)
     }
 
     static func plan(track: SpotifyTrack, document: LyricsDocument, readings: [Int: String],

@@ -5,6 +5,12 @@ import SwiftUI
 final class PhoneLyricsStore: ObservableObject {
     @Published private(set) var document: LyricsDocument?
     @Published private(set) var readings: [Int: String] = [:]
+    @Published private(set) var readingIssues: [Int: [ReadingIssue]] = [:]
+    @Published private(set) var readingChoices: [String: String] = [:]
+    @Published private(set) var readingChoiceError: String?
+    private var baseReadings: [Int: String] = [:]
+    private let preferences: ReadingPreferences
+    private var choiceRevisions: [Int: UUID] = [:]
     @Published private(set) var loading = false
     @Published private(set) var needsLogin = false
     @Published private(set) var message = "播放歌曲後顯示歌詞。"
@@ -19,7 +25,7 @@ final class PhoneLyricsStore: ObservableObject {
     private var generation = UUID()
     private let fetch: @Sendable (String) async throws -> LyricsDocument
     private let convert: @Sendable (LyricsDocument, LyricsLanguage) async -> [Int: String]
-    init(fetch: @escaping @Sendable (String) async throws -> LyricsDocument = { try await DirectLyricsClient.shared.fetch(trackID: $0) },
+    init(preferences: ReadingPreferences? = nil, fetch: @escaping @Sendable (String) async throws -> LyricsDocument = { try await DirectLyricsClient.shared.fetch(trackID: $0) },
          convert: @escaping @Sendable (LyricsDocument, LyricsLanguage) async -> [Int: String] = { document, language in
              await Task.detached(priority: .userInitiated) {
                  let engine = LyricsRomanizer()
@@ -30,6 +36,7 @@ final class PhoneLyricsStore: ObservableObject {
                  })
              }.value
          }) {
+        self.preferences = preferences ?? ReadingPreferences()
         self.fetch = fetch
         self.convert = convert
     }
@@ -46,6 +53,7 @@ final class PhoneLyricsStore: ObservableObject {
         if trackID == nil || trackID != displayedTrackID {
             document = nil
             readings = [:]
+            clearReadingReview()
             displayedTrackID = nil
         }
         loading = trackID != nil
@@ -58,9 +66,36 @@ final class PhoneLyricsStore: ObservableObject {
             message = "處理歌詞中…"
             let result = await convert(lyrics, language)
             guard generation == requestID, !Task.isCancelled else { return }
+            let savedChoices = preferences.choices
+            let reviewed = await Task.detached(priority: .userInitiated) {
+                let issues = ReadingReview().issues(document: lyrics, readings: result, language: language)
+                var choices: [String: String] = [:]
+                var overrides: [Int: [ReadingOverride]] = [:]
+                for (index, line) in lyrics.lines.enumerated() {
+                    for issue in issues[line.id] ?? [] {
+                        let key = ReadingPreferences.key(trackID: trackID, line: line, issue: issue)
+                        if let choice = savedChoices[key], let replacement = issue.replacement(for: choice) {
+                            choices[issue.id] = choice
+                            overrides[index, default: []].append(replacement)
+                        }
+                    }
+                }
+                var readings = result
+                if !overrides.isEmpty {
+                    let converted = LyricsRomanizer().convert(lyrics.lines.map(\.words), language: language, overrides: overrides)
+                    for index in overrides.keys { readings[lyrics.lines[index].id] = converted[index].romanization }
+                }
+                return (issues, choices, readings)
+            }.value
+            guard generation == requestID, !Task.isCancelled else { return }
+            choiceRevisions = [:]
             document = lyrics
             displayedTrackID = trackID
-            readings = result
+            baseReadings = result
+            readingIssues = reviewed.0
+            readingChoices = reviewed.1
+            readings = reviewed.2
+            readingChoiceError = preferences.error
             completedRequest = request
             needsLogin = false
             message = lyrics.isSynced ? "" : "此歌曲不支援逐句同步"
@@ -77,7 +112,43 @@ final class PhoneLyricsStore: ObservableObject {
         needsLogin = false
         document = nil
         readings = [:]
+        clearReadingReview()
         displayedTrackID = nil
         loading = false
     }
+    private func clearReadingReview() {
+        choiceRevisions = [:]
+        baseReadings = [:]
+        readingIssues = [:]
+        readingChoices = [:]
+        readingChoiceError = nil
+    }
+
+    func chooseReading(_ choice: String?, issueID: String, lineID: Int,
+                       trackID: String, originalLine: String) async {
+        guard !loading, displayedTrackID == trackID, let document,
+              let line = document.lines.first(where: { $0.id == lineID && $0.words == originalLine }),
+              let issue = readingIssues[lineID]?.first(where: { $0.id == issueID }),
+              choice == nil || issue.replacement(for: choice!) != nil,
+              let language = completedRequest?.language else { return }
+        let key = ReadingPreferences.key(trackID: trackID, line: line, issue: issue)
+        guard preferences.set(choice, key: key) else { readingChoiceError = preferences.error; return }
+        readingChoiceError = nil
+        readingChoices[issueID] = choice
+        let overrides = (readingIssues[lineID] ?? []).compactMap { issue in
+            readingChoices[issue.id].flatMap { issue.replacement(for: $0) }
+        }
+        let revision = UUID()
+        choiceRevisions[lineID] = revision
+        let requestGeneration = generation
+        let baseline = baseReadings[lineID]
+        let context = language == .automatic && document.lines.contains { LyricsRomanizer().containsKana($0.words) }
+        let updated = await Task.detached(priority: .userInitiated) {
+            overrides.isEmpty ? baseline : LyricsRomanizer().romanize(line.words, language: language,
+                                                                     japaneseContext: context, overrides: overrides)
+        }.value
+        guard choiceRevisions[lineID] == revision, generation == requestGeneration, displayedTrackID == trackID else { return }
+        readings[lineID] = updated
+    }
+
 }

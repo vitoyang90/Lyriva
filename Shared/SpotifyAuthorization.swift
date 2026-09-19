@@ -67,9 +67,9 @@ final class SharedFileLock {
         guard errno == EWOULDBLOCK else { throw AuthorizationError.storage }
         return false
     }
-    func acquire() async throws {
+    func acquire(attempts: Int = 40) async throws {
         // Never block the main thread or exhaust an extension's execution time.
-        for _ in 0..<40 {
+        for _ in 0..<attempts {
             try Task.checkCancellation()
             if try tryAcquire() { return }
             try await Task.sleep(for: .milliseconds(100))

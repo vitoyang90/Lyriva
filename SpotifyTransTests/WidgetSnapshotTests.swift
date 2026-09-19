@@ -68,6 +68,7 @@ struct WidgetSnapshotTests {
         let entry = LyricsWidgetEntry.scheduled(song: song, at: now.addingTimeInterval(1))
         #expect(entry.song?.original == "未来")
         #expect(entry.song?.playback == nil)
+        #expect(entry.song?.playbackIsPlaying == true)
         #expect(entry.isPredicted)
         #expect(LyricsWidgetEntry.scheduled(song: song, at: now.addingTimeInterval(8)).isExpired)
         // A delayed WidgetKit reload starts at the right lyric rather than replaying old entries.
@@ -113,10 +114,12 @@ struct WidgetSnapshotTests {
 
     @MainActor @Test func renderWidgetSizesAndEmptyStates() throws {
         let now = Date()
-        let song = WidgetSongSnapshot(trackID: "preview", title: "範例歌曲", artist: "Lyriva", original: "明日も一緒に歌おう", romanization: "asu mo issho ni utaou", nextOriginal: "世界", nextRomanization: "sekai", updatedAt: now)
+        let song = WidgetSongSnapshot(trackID: "preview", title: "範例歌曲", artist: "Lyriva", original: "明日も一緒に歌おう", romanization: "asu mo issho ni utaou", nextOriginal: "世界", nextRomanization: "sekai", updatedAt: now, authorizationID: UUID(), isPlaying: true)
         for (family, width, height) in [(WidgetFamily.systemSmall, 170.0, 170.0), (.systemMedium, 360.0, 170.0), (.systemLarge, 360.0, 376.0)] {
-            for state in ["lyrics", "empty", "expired"] {
-                let entry = LyricsWidgetEntry(date: state == "expired" ? now.addingTimeInterval(900) : now, song: state == "empty" ? nil : song)
+            for state in ["lyrics", "paused", "empty", "expired"] {
+                var displayedSong = song
+                if state == "paused" { displayedSong.isPlaying = false }
+                let entry = LyricsWidgetEntry(date: state == "expired" ? now.addingTimeInterval(900) : now, song: state == "empty" ? nil : displayedSong)
                 let view = LyricsWidgetView(entry: entry, familyOverride: family)
                     .environment(\.colorScheme, .dark)
                     .frame(width: width - 32, height: height - 32).padding(16)
@@ -126,6 +129,11 @@ struct WidgetSnapshotTests {
                 let image = try #require(renderer.uiImage?.cgImage)
                 #expect(image.width == Int(width * 2))
                 #expect(image.height == Int(height * 2))
+                if state == "lyrics" || state == "paused" {
+                    let url = FileManager.default.temporaryDirectory.appendingPathComponent("widget-controls-\(family)-\(state).png")
+                    try renderer.uiImage?.pngData()?.write(to: url)
+                    print("Widget preview: \(url.path)")
+                }
             }
         }
     }

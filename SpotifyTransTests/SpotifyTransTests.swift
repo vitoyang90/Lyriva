@@ -52,6 +52,36 @@ struct SpotifyTransTests {
         #expect(engine.convert("Hello world", language: .japanese)[0].romanization == nil)
     }
 
+    @Test func topicParticleUsesWaWithoutChangingHaInsideWords() {
+        let engine = LyricsRomanizer()
+        for (source, expected) in [
+            ("君は", "kimi wa"), ("僕には", "boku ni wa"),
+            ("ではない", "de wa nai"), ("これは", "kore wa"),
+            ("は", "wa"), ("葉は", "ha wa"),
+            ("母は花が好き", "haha wa hana ga suki"),
+            ("はな はじめ はる はは ははは", "hana hajime haru haha hahaha"),
+            ("はっきり", "hakkiri"), ("おはよう", "ohayou"),
+            ("ハ", "ha"), ("こんにちは", "kon'nichiwa"), ("こんばんは", "konbanwa"),
+            ("ha 君は WORLD!", "ha kimi wa WORLD!"),
+            ("君 は、花を", "kimi wa、hana o")
+        ] {
+            for language in [LyricsLanguage.japanese, .automatic] {
+                let result = engine.convert(source, language: language)[0]
+                #expect(result.romanization == expected)
+                #expect(result.original == source)
+            }
+        }
+    }
+
+    @MainActor @Test func topicParticleCorrectionReachesPhoneLyrics() async {
+        let store = PhoneLyricsStore(fetch: { _ in
+            LyricsDocument(lines: [.init(id: 42, words: "君は花を", startTimeMS: 1000)], isSynced: true)
+        })
+        await store.load(trackID: Self.trackID, language: .japanese)
+        #expect(store.readings[42] == "kimi wa hana o")
+        #expect(store.document?.lines.first?.words == "君は花を")
+    }
+
     @Test func smallTsuJoinsConsonantsAcrossTokenizerBoundaries() {
         let engine = LyricsRomanizer()
         for (source, expected) in [

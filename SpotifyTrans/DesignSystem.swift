@@ -112,6 +112,8 @@ struct ReadingLine: View {
     var active = false
     var size = 24.0
     var compact = false
+    var practiceLine: PracticeLyricsPlan.Line? = nil
+    var practiceProgress: Double? = nil
     @ScaledMetric(relativeTo: .title2) private var scale = 1.0
     var body: some View {
         HStack(alignment: .top, spacing: compact ? 10 : 14) {
@@ -120,16 +122,24 @@ struct ReadingLine: View {
             VStack(alignment: .leading, spacing: compact ? 4 : 9) {
                 // Keep the source readable while optional subtitles are unavailable.
                 if showOriginal || ((!showReading || reading == nil) && translation == nil) {
+                    if let practiceLine, !practiceLine.original.isEmpty {
+                        PracticeText(tokens: practiceLine.original, progress: practiceProgress, size: size * scale)
+                    } else {
                     Text(original.isEmpty ? "♪" : original)
                         .font(.system(size: size * scale, weight: .semibold))
                         .foregroundStyle(active ? Studio.accent : Studio.ink)
                         .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 if showReading, let reading {
+                    if let practiceLine, !practiceLine.reading.isEmpty {
+                        PracticeText(tokens: practiceLine.reading, progress: practiceProgress, size: size * 0.76 * scale, reading: true)
+                    } else {
                     Text(reading)
                         .font(.system(size: size * 0.76 * scale, weight: .medium, design: .rounded))
                         .foregroundStyle(Studio.muted)
                         .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 if let translation {
                     Text(translation)

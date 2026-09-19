@@ -39,11 +39,16 @@ struct LyricsTranslationPlan {
             var parts: [Part] = []
             for (index, chunk) in chunks.enumerated() {
                 let text = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard text.unicodeScalars.contains(where: CharacterSet.letters.contains) else {
+                guard !Self.contentLetters(text).isEmpty else {
                     parts.append(Part(key: nil, literal: chunk))
                     continue
                 }
                 let source = Self.language(text, selection: input.language, japaneseContext: japaneseContext)
+                if let selected = input.sourceLanguage,
+                   source.flatMap({ Locale.Language(identifier: $0).languageCode?.identifier }) != Locale.Language(identifier: selected).languageCode?.identifier {
+                    parts.append(Part(key: nil, literal: chunk))
+                    continue
+                }
                 let key = Key(language: source, text: text)
                 let leading = String(chunk.prefix(while: { $0.isWhitespace }))
                 let trailing = String(chunk.reversed().prefix(while: { $0.isWhitespace }).reversed())
@@ -74,6 +79,8 @@ struct LyricsTranslationPlan {
 
     func assembled(using translations: [Key: String]) -> [Int: String] {
         Dictionary(uniqueKeysWithValues: lines.compactMap { line in
+            // Lines outside the selected language use the existing original-text fallback.
+            guard line.parts.contains(where: { $0.key != nil }) else { return nil }
             var text = ""
             for part in line.parts {
                 if let key = part.key {
@@ -91,18 +98,18 @@ struct LyricsTranslationPlan {
         var current = ""
         var previous: Script?
         for character in text {
-            let value = String(character)
+            let value = String(character).precomposedStringWithCompatibilityMapping
             let script: Script?
             if contains(value, pattern: #"\p{Latin}"#) { script = .latin }
             else if contains(value, pattern: #"[\p{Han}\p{Hiragana}\p{Katakana}ー々〆]"#) { script = .eastAsian }
             else if contains(value, pattern: #"\p{Hangul}"#) { script = .korean }
-            else if value.unicodeScalars.contains(where: CharacterSet.letters.contains) { script = .other }
+            else if !contentLetters(value).isEmpty { script = .other }
             else { script = nil }
             if let script, let previous, script != previous {
                 chunks.append(current)
                 current = ""
             }
-            current += value
+            current.append(character)
             if let script { previous = script }
         }
         if !current.isEmpty { chunks.append(current) }
@@ -110,6 +117,9 @@ struct LyricsTranslationPlan {
     }
 
     private static func language(_ text: String, selection: LyricsLanguage, japaneseContext: Bool) -> String? {
+        // Normalize only the detection input: full-width/stylized Latin letters
+        // still belong to English fragments, while requests retain the lyrics.
+        let text = text.precomposedStringWithCompatibilityMapping
         if contains(text, pattern: #"[\p{Hiragana}\p{Katakana}]"#) { return "ja" }
         if contains(text, pattern: #"\p{Hangul}"#) { return "ko" }
         let hasHan = contains(text, pattern: #"\p{Han}"#)
@@ -119,8 +129,11 @@ struct LyricsTranslationPlan {
         let japaneseOrKoreanSong = japaneseContext || selection == .japanese || selection == .korean
         // Brief Latin refrains in Japanese/Korean songs lack enough evidence for
         // reliable detection ("I", "Stay", etc.). Avoid unrelated model downloads.
-        let letters = text.unicodeScalars.filter(CharacterSet.letters.contains)
-        if latin, japaneseOrKoreanSong, letters.count < 20, letters.allSatisfy({ $0.isASCII }) {
+        let letters = contentLetters(text)
+        let englishContext = latin && japaneseOrKoreanSong && letters.allSatisfy { $0.isASCII }
+        let words = text.lowercased().components(separatedBy: CharacterSet.letters.inverted).filter { !$0.isEmpty }
+        let refrainWords: Set<String> = ["oh", "ooh", "ah", "uh", "la", "na", "hey", "yeah", "woah", "whoa", "woo", "ha"]
+        if englishContext, letters.count < 20 || (!words.isEmpty && words.allSatisfy(refrainWords.contains)) {
             return "en"
         }
         let recognizer = NLLanguageRecognizer()
@@ -130,11 +143,26 @@ struct LyricsTranslationPlan {
         recognizer.processString(text)
         let language = recognizer.dominantLanguage?.rawValue
         if language == "zh-Hans" || language == "zh-Hant" { return "zh" }
-        if hasHan { return language }
+        if hasHan { return language ?? (japaneseContext ? "ja" : nil) }
         // Keep ordinary English greetings/refrains usable; they often have low
         // scores despite English being the recognizer's best candidate.
         if language == "en" { return "en" }
-        return confidentLanguage(recognizer.languageHypotheses(withMaximum: 2), letterCount: letters.count)
+        return contextualLatinLanguage(recognizer.languageHypotheses(withMaximum: 2),
+                                       letterCount: letters.count, englishContext: englishContext)
+    }
+
+    static func contextualLatinLanguage(_ hypotheses: [NLLanguage: Double], letterCount: Int,
+                                        englishContext: Bool) -> String? {
+        // Long refrains can be just as ambiguous as short ones. In a Japanese
+        // song, fall back to English for Latin text only when no language wins
+        // confidently; a clearly recognized French/etc. passage keeps its language.
+        confidentLanguage(hypotheses, letterCount: letterCount) ?? (englishContext ? "en" : nil)
+    }
+
+    private static func contentLetters(_ text: String) -> [Unicode.Scalar] {
+        text.unicodeScalars.filter {
+            CharacterSet.letters.contains($0) && $0.properties.generalCategory != .modifierLetter
+        }
     }
 
     // Short ambiguous fragments must not trigger an unrelated model request.

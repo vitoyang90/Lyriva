@@ -19,7 +19,8 @@ struct LyricsWidgetProvider: TimelineProvider {
 
     static var preview: LyricsWidgetEntry {
         LyricsWidgetEntry(date: Date(), song: WidgetSongSnapshot(trackID: "preview", title: "範例歌曲", artist: "Lyriva",
-            original: "世界", romanization: "sekai", nextOriginal: "未来", nextRomanization: "mirai", updatedAt: Date()))
+            original: "世界", romanization: "sekai", nextOriginal: "未来", nextRomanization: "mirai", updatedAt: Date(),
+            authorizationID: UUID(), isPlaying: true))
     }
 }
 
@@ -30,7 +31,7 @@ struct SpotifyTransLyricsWidget: Widget {
             LyricsWidgetView(entry: entry)
         }
         .configurationDisplayName("Lyriva 歌詞")
-        .description("在主畫面查看歌詞與羅馬字。更新可能延遲。")
+        .description("查看歌詞與羅馬字，直接切歌、播放或暫停。")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
     }
 }

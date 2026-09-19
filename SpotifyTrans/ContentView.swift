@@ -4,6 +4,12 @@ struct ContentView: View {
     @StateObject private var spotify: SpotifyConnection
     @StateObject private var phoneLyrics: PhoneLyricsStore
     @StateObject private var widgetPublisher = WidgetSnapshotPublisher()
+    @StateObject private var library: SongLibrary
+    @State private var listeningSession = ListeningSession.spotify(.normal)
+    private var listeningMode: ListeningMode {
+        listeningSession.mode(for: spotify.track?.id)
+    }
+    @State private var favoritesShown = false
     @State private var settingsShown = false
     @State private var loginShown = false
     @State private var checkedSavedLogin = false
@@ -15,13 +21,25 @@ struct ContentView: View {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--landscape-ui-fixture") {
             _spotify = StateObject(wrappedValue: LandscapeUITestFixture.connection())
-            _phoneLyrics = StateObject(wrappedValue: PhoneLyricsStore(fetch: { _ in LandscapeUITestFixture.document }))
+            _phoneLyrics = StateObject(wrappedValue: PhoneLyricsStore(
+                preferences: ReadingPreferences(file: FileManager.default.temporaryDirectory
+                    .appendingPathComponent("ui-readings-\(UUID().uuidString).json")),
+                fetch: { LandscapeUITestFixture.document(for: $0) }))
+            let library = SongLibrary(file: FileManager.default.temporaryDirectory
+                .appendingPathComponent("ui-favorites-\(UUID().uuidString).json"))
+            if ProcessInfo.processInfo.arguments.contains("--favorite-playback-ui-fixture") {
+                library.toggle(SpotifyTrack(id: "favorite-fixture-song", duration_ms: 180000,
+                    name: "Favorite Session", artists: [.init(name: "Lyriva Studio")],
+                    external_urls: .init(spotify: nil), album: nil))
+            }
+            _library = StateObject(wrappedValue: library)
             publishesWidgets = false
             return
         }
         #endif
         _spotify = StateObject(wrappedValue: SpotifyConnection())
         _phoneLyrics = StateObject(wrappedValue: PhoneLyricsStore())
+        _library = StateObject(wrappedValue: SongLibrary())
         publishesWidgets = true
     }
 
@@ -46,7 +64,7 @@ struct ContentView: View {
                         .frame(width: landscape ? min(320, max(260, geometry.size.width * 0.34)) : nil)
                         if spotify.connected || landscape {
                             SyncedLyricsView(spotify: spotify, store: phoneLyrics, loginRevision: loginRevision,
-                                             landscape: landscape) { loginShown = true }
+                                             landscape: landscape, listeningMode: listeningMode) { loginShown = true }
                                 .frame(maxWidth: .infinity, maxHeight: landscape ? .infinity : nil, alignment: .top)
                         }
                     }
@@ -71,6 +89,14 @@ struct ContentView: View {
             }
         }
         .foregroundStyle(Studio.ink).tint(Studio.accent).preferredColorScheme(.dark)
+        .sheet(isPresented: $favoritesShown) {
+            FavoriteSongsView(library: library, currentTrackID: spotify.track?.id) { song, mode in
+                favoritesShown = false
+                guard spotify.connected, !spotify.requiresReauthorization else { loginShown = true; return }
+                listeningSession = .favorite(trackID: song.id, mode: mode)
+                Task { await spotify.playTrack(id: song.id) }
+            }
+        }
         .fullScreenCover(isPresented: $loginShown) {
             SpotifyLoginView(spotify: spotify, lyrics: phoneLyrics) {
                 phoneLyrics.loginDidChange()
@@ -85,6 +111,7 @@ struct ContentView: View {
         .onOpenURL { url in
             if url.scheme == "spotifytrans", url.host == "lyrics" {
                 settingsShown = false
+                Task { await spotify.openFromWidget() }
                 return
             }
             if spotify.playbackStarter.handleCallback(url) {
@@ -95,7 +122,11 @@ struct ContentView: View {
             spotify.playbackStarter.sceneChanged(phase)
             if publishesWidgets, phase != .active { widgetPublisher.update(spotify: spotify, lyrics: phoneLyrics, force: true) }
         }
+        .onChange(of: spotify.track?.id) { previous, current in
+            listeningSession.trackChanged(from: previous, to: current)
+        }
         .onChange(of: spotify.connected) { _, connected in
+            if !connected { listeningSession = .spotify(.normal) }
             if publishesWidgets, !connected { widgetPublisher.clear() }
         }
         .task(id: scenePhase == .active) {
@@ -125,9 +156,20 @@ struct ContentView: View {
                     .accessibilityHidden(true)
                 Text("Lyriva").font(.system(.headline, design: .rounded, weight: .bold))
                 Spacer()
+                Button { favoritesShown = true } label: {
+                    Image(systemName: "heart.text.clipboard").font(.system(size: 19))
+                        .frame(width: 44, height: 44)
+                }.accessibilityLabel("收藏歌曲").accessibilityIdentifier("open-favorites")
                 IconButton(symbol: "slider.horizontal.3", label: "設定") { settingsShown = true }
             }
-            SpotifyConnectionView(spotify: spotify, starter: spotify.playbackStarter, compact: compact) { loginShown = true }
+            SpotifyConnectionView(spotify: spotify, starter: spotify.playbackStarter, compact: compact,
+                listeningSession: listeningSession, setListeningMode: { mode in
+                    listeningSession = .spotify(mode)
+                },
+                isFavorite: library.contains(spotify.track?.id), toggleFavorite: {
+                    if let track = spotify.track { library.toggle(track) }
+                }) { loginShown = true }
+            if let error = library.error { Text(error).font(.caption).foregroundStyle(Studio.accent) }
             if let error = widgetPublisher.error {
                 Text(error).font(.caption).foregroundStyle(Studio.muted)
             }

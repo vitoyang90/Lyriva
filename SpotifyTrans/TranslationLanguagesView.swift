@@ -18,6 +18,9 @@ enum TranslationModels {
     static func supportedCodes() async -> [String] {
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--landscape-ui-fixture") {
+            if ProcessInfo.processInfo.arguments.contains("--translation-language-list-ui-fixture") {
+                return languageCodes(from: ["ar", "bg", "cs", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "hr", "hu", "id", "it", "ja", "ko", "ms", "nb", "nl", "pl", "pt", "ro", "ru", "sk", "sv", "th", "tr", "uk", "vi"].map { Locale.Language(identifier: $0) })
+            }
             return languageCodes(from: ["ja", "en", "ko", "fr", "de", "es"].map { Locale.Language(identifier: $0) })
         }
         #endif
@@ -69,11 +72,18 @@ enum TranslationModels {
 
 struct TranslationLanguagesView: View {
     var preferredLanguages: [String] = []
+    @AppStorage("lyricsTranslationSourceLanguage") private var sourceLanguage = ""
     @Environment(\.scenePhase) private var scenePhase
     @State private var languages: [String] = []
     @State private var loading = true
     @State private var search = ""
     @State private var statuses: [String: LanguageAvailability.Status] = [:]
+    @State private var sourceChoices: SourceLanguageChoices?
+
+    private struct SourceLanguageChoices: Identifiable {
+        let id = UUID()
+        let codes: [String]
+    }
 
     private var orderedLanguages: [String] {
         TranslationModels.orderedCodes(languages, statuses: statuses, preferred: preferredLanguages)
@@ -84,9 +94,40 @@ struct TranslationLanguagesView: View {
             || $0.localizedStandardContains(search) }
     }
 
+    private var selectableLanguages: [String] {
+        Array(Set(languages + (sourceLanguage.isEmpty ? [] : [sourceLanguage]))).sorted {
+            TranslationModels.name($0).localizedStandardCompare(TranslationModels.name($1)) == .orderedAscending
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("翻譯範圍").font(.headline)
+                    Button {
+                        // Snapshot the choices for this presentation; model-status
+                        // updates must not rebuild or reorder the open list.
+                        sourceChoices = SourceLanguageChoices(codes: selectableLanguages)
+                    } label: {
+                        HStack {
+                            Text(sourceLanguage.isEmpty ? "全部語言" : "只翻\(TranslationModels.name(sourceLanguage))")
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                        }
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Studio.accent)
+                    .disabled(loading)
+                    .tint(Studio.accent)
+                    .accessibilityLabel("翻譯範圍")
+                    .accessibilityValue(sourceLanguage.isEmpty ? "全部語言" : "只翻\(TranslationModels.name(sourceLanguage))")
+                    .accessibilityIdentifier("translation-source-language")
+                    Text("只翻指定語言時，其他語言保留原文；同一句混合語言也只翻譯符合的片段。")
+                        .font(.caption).foregroundStyle(Studio.muted)
+                }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
                 Text("選擇需要的語言，下載後即可在本機翻譯。")
                     .font(.subheadline).foregroundStyle(Studio.muted)
                 if loading { ProgressView("檢查可用語言…") }
@@ -129,6 +170,7 @@ struct TranslationLanguagesView: View {
         .background(Studio.background).foregroundStyle(Studio.ink).tint(Studio.accent)
         .navigationTitle("翻譯語言").navigationBarTitleDisplayMode(.inline)
         .searchable(text: $search, prompt: "搜尋語言")
+        .searchPresentationToolbarBehavior(.avoidHidingContent)
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             let codes = await TranslationModels.supportedCodes()
@@ -139,6 +181,71 @@ struct TranslationLanguagesView: View {
         .toolbar(.visible, for: .navigationBar)
         .toolbarBackground(Studio.background, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
+        .sheet(item: $sourceChoices) { choices in
+            TranslationSourceLanguageSheet(codes: choices.codes, selection: $sourceLanguage)
+        }
+    }
+}
+
+private struct TranslationSourceLanguageSheet: View {
+    let codes: [String]
+    @Binding var selection: String
+    @State private var search = ""
+    @Environment(\.dismiss) private var dismiss
+
+    private var filteredCodes: [String] {
+        codes.filter {
+            search.isEmpty || TranslationModels.name($0).localizedStandardContains(search)
+                || $0.localizedStandardContains(search)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                option("全部語言", code: "")
+                ForEach(filteredCodes, id: \.self) { code in
+                    option("只翻\(TranslationModels.name(code))", code: code)
+                }
+                if !search.isEmpty, filteredCodes.isEmpty {
+                    Text("找不到符合的語言。")
+                        .foregroundStyle(Studio.muted).listRowBackground(Studio.surface)
+                }
+            }
+            .accessibilityIdentifier("translation-source-list")
+            .scrollContentBackground(.hidden)
+            .background(Studio.background)
+            .searchable(text: $search, prompt: "搜尋語言名稱或代碼")
+            .searchPresentationToolbarBehavior(.avoidHidingContent)
+            .navigationTitle("翻譯範圍")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .foregroundStyle(Studio.ink).tint(Studio.accent)
+        .preferredColorScheme(.dark)
+        .presentationDragIndicator(.visible)
+    }
+
+    private func option(_ title: String, code: String) -> some View {
+        Button {
+            selection = code
+            dismiss()
+        } label: {
+            HStack {
+                Text(title)
+                Spacer()
+                if selection == code {
+                    Image(systemName: "checkmark").foregroundStyle(Studio.accent)
+                }
+            }.frame(minHeight: 32).contentShape(Rectangle())
+        }
+        .listRowBackground(Studio.surface)
+        .accessibilityIdentifier("translation-source-option-\(code.isEmpty ? "all" : code)")
+        .accessibilityAddTraits(selection == code ? [.isSelected] : [])
     }
 }
 

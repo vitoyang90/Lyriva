@@ -14,6 +14,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
     @Published private(set) var progressMS: Double?
     @Published private(set) var isPlaying = false
     private(set) var lastPlaybackSync: Date?
+    private(set) var playbackControlID: UUID?
     private var sampledAt = Date()
     private var playbackStale = false
     var canPredictPlayback: Bool { isPlaying && !playbackStale }
@@ -23,10 +24,11 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         return min(Double(track?.duration_ms ?? Int.max), max(0, progressMS + (isPlaying && !playbackStale ? max(0, date.timeIntervalSince(sampledAt)) * 1000 : 0)))
     }
 
-    let playbackStarter = SpotifyPlaybackStarter()
+    let playbackStarter: SpotifyPlaybackStarter
     private var session: ASWebAuthenticationSession?
     private var clientID = ""
     private var retryAfter = Date.distantPast
+    private var playbackRevision = UUID()
     static let redirectURI = "spotifytrans://callback"
 
     typealias Track = SpotifyTrack
@@ -45,12 +47,16 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
     private let sessionStorage: any SpotifySessionStorage
     private let authorization: SpotifyAuthorization
     private let playbackSession: URLSession
+    private let widgetStorage: WidgetSnapshotStorage
     init(restoreSession: Bool = true, sessionStorage: any SpotifySessionStorage = KeychainSessionStorage(),
-         authorization: SpotifyAuthorization = .shared, playbackSession: URLSession = .shared) {
+         authorization: SpotifyAuthorization = .shared, playbackSession: URLSession = .shared,
+         playbackStarter: SpotifyPlaybackStarter? = nil, widgetStorage: WidgetSnapshotStorage = WidgetSnapshotStorage()) {
         self.restoreSession = restoreSession
         self.sessionStorage = sessionStorage
         self.authorization = authorization
         self.playbackSession = playbackSession
+        self.widgetStorage = widgetStorage
+        self.playbackStarter = playbackStarter ?? SpotifyPlaybackStarter()
         super.init()
         restoreSavedSession()
         if restoreSession { _ = try? LyricsCredential.read() }
@@ -122,31 +128,89 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
     }
 
     func refresh(showActivity: Bool = true) async {
-        guard connected, !requiresReauthorization, !busy, !playbackStarter.isStarting else { return }
+        guard connected, !requiresReauthorization, !busy,
+              !playbackStarter.isStarting || playbackStarter.isConfirmingPlayback else { return }
         guard Date() >= retryAfter else { return }
         busy = true
         showingActivity = showActivity
+        let revision = playbackRevision
         defer { busy = false; showingActivity = false }
         do {
             let authorization = try await self.authorization.validSession()
+            guard connected, playbackRevision == revision, !Task.isCancelled else { return }
             let accessToken = authorization.accessToken
-            var request = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player/currently-playing")!)
+            var request = URLRequest(url: URL(string: "https://api.spotify.com/v1/me/player/currently-playing")!,
+                                     cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 8)
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            let widgetState = widgetStorage.read()
+            guard widgetState?.isControlInFlight != true else { throw AuthorizationError.busy }
+            let controlID = widgetState?.controlID
             let (data, response) = try await playbackSession.data(for: request)
+            guard connected, playbackRevision == revision, !Task.isCancelled else { return }
             guard let response = response as? HTTPURLResponse else { throw ConnectionError(message: "暫時無法同步，請稍後重試。") }
             if response.statusCode == 401 {
                 try await self.authorization.invalidate(authorization)
                 throw AuthorizationError.busy
             }
-            try applyPlaybackResponse(data: data, response: response)
+            try applyPlaybackResponse(data: data, response: response, controlID: controlID,
+                widgetSnapshot: widgetState?.authorizationID == authorization.id ? widgetState : nil)
+            if let command = playbackStarter.takePlaybackCommandAfterWake() {
+                playbackStarter.reset()
+                busy = false
+                await control(command, canWakeSpotify: false)
+            }
         } catch {
-            if Task.isCancelled { return }
+            if Task.isCancelled || playbackRevision != revision || !connected { return }
             preservePlaybackAfterRefreshFailure(error)
         }
     }
 
-    func applyPlaybackResponse(data: Data, response: HTTPURLResponse) throws {
+    func openFromWidget() async {
+        // Opening lyrics is navigation, not the return of an old authorize-and-play
+        // attempt. Invalidate its callbacks and timeout before reading playback.
+        playbackStarter.reset()
+        restoreSavedSession()
+        if connected, let saved = try? sessionStorage.read(), let snapshot = widgetStorage.read(),
+           snapshot.authorizationID == saved.id, snapshot.isPlaying == false,
+           snapshot.updatedAt >= (lastPlaybackSync ?? .distantPast),
+           Date().timeIntervalSince(snapshot.updatedAt) < WidgetSongSnapshot.freshness,
+           let duration = snapshot.durationMS, duration > 0,
+           let position = snapshot.positionMS, position.isFinite, position >= 0 {
+            // Cold launches have no in-memory track. Restore only the same
+            // account's recent paused snapshot, then verify it with Spotify.
+            track = Track(id: snapshot.trackID, duration_ms: duration, name: snapshot.title,
+                artists: [.init(name: snapshot.artist)], external_urls: .init(spotify: nil), album: nil)
+            progressMS = min(position, Double(duration))
+            isPlaying = false
+            sampledAt = snapshot.updatedAt
+            lastPlaybackSync = snapshot.updatedAt
+            playbackControlID = snapshot.controlID
+            playbackStale = true
+            status = "已暫停，正在同步 Spotify。"
+        }
+        await refresh(showActivity: false)
+    }
+
+    func applyPlaybackResponse(data: Data, response: HTTPURLResponse, controlID: UUID? = nil,
+                               widgetSnapshot: WidgetSongSnapshot? = nil) throws {
         if response.statusCode == 204 {
+            playbackControlID = controlID
+            let widgetPaused = widgetSnapshot.flatMap { snapshot -> Date? in
+                guard snapshot.trackID == track?.id, snapshot.isPlaying == false,
+                      snapshot.updatedAt >= (lastPlaybackSync ?? .distantPast) else { return nil }
+                return snapshot.updatedAt
+            }
+            // A paused Spotify device can stop reporting a current track. Keep
+            // the known paused song; an empty player response is not a logout.
+            if track != nil, !isPlaying || widgetPaused != nil {
+                progressMS = playbackPosition(at: widgetPaused ?? Date())
+                sampledAt = Date()
+                isPlaying = false
+                playbackStale = true
+                playbackStarter.playbackObserved(isPlaying: false, hasTrack: true)
+                status = "已暫停，等待 Spotify 同步。"
+                return
+            }
             progressMS = nil
             isPlaying = false
             track = nil
@@ -166,6 +230,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         // Episodes do not have the same schema as music tracks.
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard object?["currently_playing_type"] as? String == "track" else {
+            playbackControlID = controlID
             progressMS = nil
             isPlaying = false
             track = nil
@@ -173,12 +238,15 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
             return
         }
         let playback = try JSONDecoder().decode(Playback.self, from: data)
+        playbackControlID = controlID
         progressMS = playback.progress_ms
         isPlaying = playback.is_playing
         sampledAt = Date()
         lastPlaybackSync = sampledAt
         playbackStale = false
         track = playback.item
+        playbackStarter.playbackObserved(isPlaying: playback.is_playing && playback.item != nil,
+                                         hasTrack: playback.item != nil, trackID: playback.item?.id)
         status = track == nil ? "尚未播放" : (playback.is_playing ? "播放中" : "已暫停")
     }
 
@@ -196,10 +264,11 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
 
     enum PlaybackCommand: Equatable {
         case play, pause, previous, next
+        case track(String)
         case seek(positionMS: Int)
         var path: String {
             switch self {
-            case .play: return "play"
+            case .play, .track: return "play"
             case .pause: return "pause"
             case .previous: return "previous"
             case .next: return "next"
@@ -208,7 +277,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         }
         var method: String {
             switch self {
-            case .play, .pause, .seek: return "PUT"
+            case .play, .pause, .seek, .track: return "PUT"
             case .previous, .next: return "POST"
             }
         }
@@ -220,8 +289,26 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
             var request = URLRequest(url: url.url!, timeoutInterval: 15)
             request.httpMethod = method
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if case .track(let id) = self {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try? JSONSerialization.data(withJSONObject: ["uris": ["spotify:track:\(id)"], "position_ms": 0])
+            }
             return request
         }
+    }
+
+    func playTrack(id: String) async {
+        guard !id.isEmpty, id.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "-" }) else { return }
+        let revision = UUID()
+        playbackRevision = revision
+        playbackStarter.reset()
+        let deadline = Date().addingTimeInterval(15)
+        while busy && playbackRevision == revision && Date() < deadline {
+            do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+        }
+        guard !Task.isCancelled, playbackRevision == revision else { return }
+        guard !busy else { status = "正在同步，請稍後再點選歌曲。"; return }
+        await control(.track(id))
     }
 
     func seek(to position: Double, trackID: String) async {
@@ -243,50 +330,49 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         await control(.seek(positionMS: target))
     }
 
-    func control(_ command: PlaybackCommand) async {
+    func control(_ command: PlaybackCommand, canWakeSpotify: Bool = true) async {
         guard connected, !requiresReauthorization, !busy, !playbackStarter.isStarting else { return }
         playbackStarter.reset()
-        if command == .play, track == nil {
-            playbackStarter.start(clientID: clientID)
-            return
-        }
+        // A missing/stale track does not mean Spotify has no active device.
+        // Try the saved Web API grant before asking for separate SDK authorization.
         guard Date() >= retryAfter else {
             status = "操作過於頻繁，請稍後再試。"
             return
         }
         let commandTrackID = track?.id
+        let revision = playbackRevision
         busy = true
         showingActivity = true
         defer { busy = false; showingActivity = false }
         do {
-            let authorization = try await self.authorization.validSession()
-            let accessToken = authorization.accessToken
-            if case .seek = command {
-                guard connected, track?.id == commandTrackID, !Task.isCancelled else { return }
-            }
-            let (_, rawResponse) = try await playbackSession.data(for: command.request(token: accessToken))
+            let controlID = widgetStorage.read()?.controlID
+            let (_, rawResponse) = try await sendPlaybackCommand(command, revision: revision, trackID: commandTrackID)
+            guard connected, playbackRevision == revision, !Task.isCancelled else { return }
             let response = rawResponse as? HTTPURLResponse
             switch response?.statusCode {
-            case 200, 204:
+            case 200, 202, 204:
                 if case .seek(let position) = command {
                     guard connected, track?.id == commandTrackID else { return }
                     progressMS = Double(position)
                     sampledAt = Date()
                     lastPlaybackSync = sampledAt
+                    playbackControlID = controlID
                     playbackStale = false
                     status = isPlaying ? "播放中" : "已暫停"
                     return
                 }
+                if case .track(let id) = command { playbackStarter.confirmPlayback(trackID: id) }
+                else if command == .play { playbackStarter.confirmPlayback() }
                 busy = false
                 await refresh()
                 return
             case 401:
-                try await self.authorization.invalidate(authorization)
-                status = "正在更新連線，請稍後再試。"
+                throw AuthorizationError.reauthorizationRequired
             case 403:
                 status = "無法控制播放。請確認 Spotify Premium 資格與播放權限。"
             case 404:
-                if command == .play { playbackStarter.start(clientID: clientID) }
+                if canWakeSpotify, command == .play { playbackStarter.start(clientID: clientID) }
+                else if canWakeSpotify, case .track(let id) = command { playbackStarter.start(clientID: clientID, trackID: id) }
                 else { status = "找不到播放裝置，請先開啟 Spotify。" }
             case 429:
                 let delay = Double(response?.value(forHTTPHeaderField: "Retry-After") ?? "30") ?? 30
@@ -294,7 +380,29 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
                 status = "操作過於頻繁，請稍後再試。"
             default: status = "操作失敗，請稍後再試。"
             }
-        } catch { preservePlaybackAfterRefreshFailure(error) }
+        } catch {
+            guard connected, playbackRevision == revision, !Task.isCancelled, !(error is CancellationError) else { return }
+            preservePlaybackAfterRefreshFailure(error)
+        }
+    }
+
+    private func sendPlaybackCommand(_ command: PlaybackCommand, revision: UUID,
+                                     trackID: String?) async throws -> (Data, URLResponse) {
+        let sessionID = try sessionStorage.read()?.id
+        for attempt in 0..<2 {
+            let credential = try await authorization.validSession()
+            try Task.checkCancellation()
+            guard connected, playbackRevision == revision, credential.id == sessionID else { throw CancellationError() }
+            if case .seek = command, track?.id != trackID { throw CancellationError() }
+            let result = try await playbackSession.data(for: command.request(token: credential.accessToken))
+            guard connected, playbackRevision == revision, !Task.isCancelled else { throw CancellationError() }
+            if (result.1 as? HTTPURLResponse)?.statusCode == 401, attempt == 0 {
+                try await authorization.invalidate(credential)
+                continue
+            }
+            return result
+        }
+        throw AuthorizationError.reauthorizationRequired
     }
 
     func disconnect() {
@@ -303,6 +411,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
             catch { status = error.localizedDescription; return }
         }
         playbackStarter.reset()
+        playbackRevision = UUID()
         lastPlaybackSync = nil
         retryAfter = .distantPast
         connected = false

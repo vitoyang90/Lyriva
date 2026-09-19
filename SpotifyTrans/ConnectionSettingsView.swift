@@ -19,15 +19,12 @@ struct SpotifyLoginView: View {
                 HStack {
                     Text("Lyriva").font(.title.bold())
                     Spacer()
-                    IconButton(symbol: "xmark", label: "關閉登入頁") { dismiss() }
+                    IconButton(symbol: "xmark", label: "關閉帳號設定") { dismiss() }
                 }
-                Image("LyrivaMark").resizable().scaledToFit()
-                    .frame(width: 80, height: 80)
-                    .clipShape(RoundedRectangle(cornerRadius: 22)).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 10) {
-                    Text(spotify.connected && !spotify.requiresReauthorization ? "準備開始跟唱" : "連接你的 Spotify")
+                    Text("Spotify 帳號")
                         .font(.largeTitle.bold())
-                    Text("連接帳號，讓歌詞跟著音樂走。")
+                    Text("管理播放授權與歌詞登入。")
                         .foregroundStyle(Studio.muted)
                 }
                 VStack(alignment: .leading, spacing: 16) {
@@ -73,13 +70,14 @@ struct SpotifyLoginView: View {
                             }.frame(minHeight: 44).disabled(spotify.busy || signingOut)
                         }.font(.subheadline)
                     }
-                }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
-                if spotify.connected && !spotify.requiresReauthorization {
-                    Button(lyricsSaved && !lyrics.needsLogin ? "開始使用" : "稍後啟用歌詞，先開始使用") { dismiss() }
-                        .buttonStyle(StudioButton(prominent: lyricsSaved && !lyrics.needsLogin))
-                        .disabled(signingOut)
                 }
-            }.padding(24)
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Studio.surface, in: RoundedRectangle(cornerRadius: 20))
+            }
+            .frame(maxWidth: 600, alignment: .leading)
+            .padding(24)
+            .frame(maxWidth: .infinity)
         }
         .foregroundStyle(Studio.ink).background(Studio.background).tint(Studio.accent)
         .preferredColorScheme(.dark)
@@ -139,35 +137,44 @@ struct ConnectionSettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                VStack(alignment: .leading, spacing: 16) {
-                    Label("Spotify 帳號", systemImage: "person.crop.circle").font(.headline)
-                    Text(spotify.requiresReauthorization ? "需要重新授權" : (spotify.connected ? "已保存登入" : "尚未連接"))
-                        .font(.subheadline).foregroundStyle(Studio.muted)
-                    Button("管理 Spotify 帳號") { loginShown = true }.buttonStyle(StudioButton())
-                }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
+            VStack(alignment: .leading, spacing: 12) {
+                Button { loginShown = true } label: {
+                    settingsRow(
+                        "Spotify 帳號",
+                        subtitle: spotify.requiresReauthorization ? "需要重新授權" : (spotify.connected ? "已保存登入" : "尚未連接"),
+                        symbol: "person.crop.circle"
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("管理 Spotify 帳號")
+
                 NavigationLink {
                     TranslationLanguagesView()
                 } label: {
-                    HStack(spacing: 14) {
-                        Image(systemName: "character.bubble").font(.title2).foregroundStyle(Studio.accent)
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("翻譯語言").font(.headline)
-                            Text("管理本機翻譯與語言下載").font(.subheadline).foregroundStyle(Studio.muted)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right").foregroundStyle(Studio.muted)
-                    }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
-                }.buttonStyle(.plain)
-                DisclosureGroup("使用說明") {
+                    settingsRow("翻譯語言", subtitle: "管理本機翻譯與語言下載", symbol: "character.bubble")
+                }
+                .buttonStyle(.plain)
+
+                DisclosureGroup {
                     VStack(alignment: .leading, spacing: 12) {
                         Text("播放控制需 Spotify Premium，並已安裝及登入 Spotify。")
                         Text("長按主畫面加入小工具，搜尋 Lyriva。")
                         Text("小工具更新可能延遲，點一下可開啟 App 更新。")
                         Text("歌詞使用非官方來源，部分歌曲可能無法取得。羅馬字讀音僅供參考。")
-                    }.font(.caption).foregroundStyle(Studio.muted).padding(.top, 12)
-                }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
-            }.padding(24)
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(Studio.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 12)
+                } label: {
+                    settingsLabel("使用說明", subtitle: "播放需求、小工具與歌詞", symbol: "questionmark.circle")
+                }
+                .padding(20)
+                .background(Studio.surface, in: RoundedRectangle(cornerRadius: 20))
+            }
+            .frame(maxWidth: 600, alignment: .leading)
+            .padding(24)
+            .frame(maxWidth: .infinity)
         }
         .foregroundStyle(Studio.ink).background(Studio.background).tint(Studio.accent)
         .preferredColorScheme(.dark)
@@ -180,4 +187,36 @@ struct ConnectionSettingsView: View {
             SpotifyLoginView(spotify: spotify, lyrics: lyrics, onLyricsLogin: onLyricsLogin)
         }
     }
+
+    private func settingsRow(_ title: String, subtitle: String, symbol: String) -> some View {
+        HStack(spacing: 12) {
+            settingsLabel(title, subtitle: subtitle, symbol: symbol)
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(Studio.muted)
+                .accessibilityHidden(true)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Studio.surface, in: RoundedRectangle(cornerRadius: 20))
+        .contentShape(RoundedRectangle(cornerRadius: 20))
+    }
+
+    private func settingsLabel(_ title: String, subtitle: String, symbol: String) -> some View {
+        HStack(spacing: 14) {
+            Image(systemName: symbol)
+                .font(.system(size: 21))
+                .foregroundStyle(Studio.accent)
+                .frame(width: 40, height: 40)
+                .background(Studio.raised, in: RoundedRectangle(cornerRadius: 12))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title).font(.headline)
+                Text(subtitle).font(.subheadline).foregroundStyle(Studio.muted)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
 }

@@ -4,7 +4,13 @@ struct SpotifyConnectionView: View {
     @ObservedObject var spotify: SpotifyConnection
     @ObservedObject var starter: SpotifyPlaybackStarter
     var compact = false
+    var listeningSession = ListeningSession.spotify(.normal)
+    var setListeningMode: ((ListeningMode) -> Void)? = nil
+    var isFavorite = false
+    var toggleFavorite: (() -> Void)? = nil
     var openSettings: () -> Void
+    @Environment(\.openURL) private var openURL
+    @State private var spotifyUnavailable = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 22) {
@@ -50,6 +56,7 @@ struct SpotifyConnectionView: View {
                     Spacer(minLength: 0)
                     Button { Task { await spotify.control(.previous) } } label: {
                         Image(systemName: "backward.end.fill").frame(width: 44, height: 48)
+                            .contentShape(Rectangle())
                     }.accessibilityLabel("上一首")
                     Button { Task { await spotify.control(spotify.isPlaying ? .pause : .play) } } label: {
                         Image(systemName: spotify.isPlaying ? "pause.fill" : "play.fill")
@@ -59,6 +66,7 @@ struct SpotifyConnectionView: View {
                     }.accessibilityLabel(spotify.isPlaying ? "暫停" : "播放")
                     Button { Task { await spotify.control(.next) } } label: {
                         Image(systemName: "forward.end.fill").frame(width: 44, height: 48)
+                            .contentShape(Rectangle())
                     }.accessibilityLabel("下一首")
                     Spacer(minLength: 0)
                 }
@@ -69,20 +77,73 @@ struct SpotifyConnectionView: View {
                 if spotify.requiresReauthorization {
                     Button("更新 Spotify 授權", action: openSettings).buttonStyle(StudioButton())
                 }
-                if let url = spotify.track?.external_urls.spotify {
-                    Link(destination: url) {
-                        Label("在 Spotify 開啟", systemImage: "arrow.up.right").font(.caption.weight(.medium))
-                    }.foregroundStyle(Studio.accent)
+                if setListeningMode != nil {
+                    listeningModePicker
                 }
             } else {
                 Button(action: openSettings) {
                     HStack { Text("連接 Spotify"); Spacer(); Image(systemName: "arrow.up.right") }
                 }.buttonStyle(StudioButton(prominent: true))
             }
+            if spotify.connected || spotify.track?.id != nil {
+                HStack(alignment: .center) {
+                    if spotify.connected {
+                        spotifyLink
+                    }
+                    Spacer(minLength: 12)
+                    if spotify.track?.id != nil, let toggleFavorite {
+                        Button(action: toggleFavorite) {
+                            Image(systemName: isFavorite ? "heart.fill" : "heart")
+                                .foregroundStyle(isFavorite ? Studio.accent : Studio.muted)
+                                .frame(width: 44, height: 44)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(isFavorite ? "取消收藏目前歌曲" : "收藏目前歌曲")
+                        .accessibilityIdentifier("favorite-current-song")
+                    }
+                }
+            }
         }
         .padding(compact ? 14 : 24)
         .background(Studio.surface, in: RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Studio.ink.opacity(0.07)))
+    }
+
+    private var listeningModePicker: some View {
+        Picker("播放模式", selection: Binding(
+            get: { listeningSession.mode(for: spotify.track?.id) },
+            set: { setListeningMode?($0) }
+        )) {
+            Text("一般").tag(ListeningMode.normal)
+            Text("跟唱").tag(ListeningMode.practice)
+        }
+        .pickerStyle(.segmented)
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("listening-mode")
+        .accessibilityLabel("播放模式")
+    }
+
+    private var spotifyLink: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                // Switch apps without opening a track or sending a playback command.
+                // Spotify retains control of its current screen and playback context.
+                spotifyUnavailable = false
+                openURL(URL(string: "spotify://")!) { accepted in
+                    spotifyUnavailable = !accepted
+                }
+            } label: {
+                Label("切換至 Spotify", systemImage: "arrow.up.right").font(.caption.weight(.medium))
+            }
+            .foregroundStyle(Studio.accent)
+            .accessibilityHint("返回 Spotify，保留目前播放列表與佇列")
+            if spotifyUnavailable {
+                Text("無法開啟 Spotify，請確認此裝置已安裝 Spotify。")
+                    .font(.caption)
+                    .foregroundStyle(Studio.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }
 

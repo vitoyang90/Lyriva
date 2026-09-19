@@ -11,11 +11,13 @@ struct LyricsTranslationInput: Hashable {
     let trackID: String
     let lines: [Line]
     let language: LyricsLanguage
+    let sourceLanguage: String?
 
-    init(trackID: String, document: LyricsDocument, language: LyricsLanguage) {
+    init(trackID: String, document: LyricsDocument, language: LyricsLanguage, sourceLanguage: String? = nil) {
         self.trackID = trackID
         self.lines = document.lines.map { Line(id: $0.id, text: $0.words) }
         self.language = language
+        self.sourceLanguage = sourceLanguage.flatMap { $0.isEmpty ? nil : $0 }
     }
 
     var textLines: [Line] {
@@ -46,9 +48,12 @@ final class LyricsTranslationStore: ObservableObject {
     private var pending: [LyricsTranslationPlan.Group] = []
     private var failures: [String] = []
     private let availabilityCheck: ((String) async -> LanguageAvailability.Status)?
+    private let availabilityRetryDelay: Duration
 
-    init(availabilityCheck: ((String) async -> LanguageAvailability.Status)? = nil) {
+    init(availabilityCheck: ((String) async -> LanguageAvailability.Status)? = nil,
+         availabilityRetryDelay: Duration = .milliseconds(350)) {
         self.availabilityCheck = availabilityCheck
+        self.availabilityRetryDelay = availabilityRetryDelay
     }
 
     func configure(_ input: LyricsTranslationInput, enabled: Bool) async {
@@ -98,9 +103,7 @@ final class LyricsTranslationStore: ObservableObject {
                 continue
             }
             do {
-                let status = await (availabilityCheck ?? TranslationModels.status)(code)
-                guard generation == id else { return }
-                guard !Task.isCancelled else { loading = false; return }
+                guard let status = await confirmedAvailability(code, generation: id) else { return }
                 if status != .installed {
                     if status == .supported {
                         if !missingLanguages.contains(code) { missingLanguages.append(code) }
@@ -111,17 +114,67 @@ final class LyricsTranslationStore: ObservableObject {
                     continue
                 }
             }
-            // Version each group/retry. Do not clear the active configuration
-            // before awaiting availability, which would cancel this task early.
-            var next = lastConfiguration ?? TranslationSession.Configuration(source: group.source, target: target)
-            next.source = group.source
-            next.target = target
-            next.invalidate()
-            lastConfiguration = next
-            configuration = next
+            activate(group, target: target)
             return
         }
         finish()
+    }
+
+    private func confirmedAvailability(_ code: String, generation id: UUID) async -> LanguageAvailability.Status? {
+        let check = availabilityCheck ?? TranslationModels.status
+        var status = await check(code)
+        guard generation == id else { return nil }
+        guard !Task.isCancelled else { loading = false; return nil }
+        // A supported pair may not be ready yet. Confirm before showing a
+        // download prompt, without treating old installed status as permanent.
+        if status == .supported {
+            do { try await Task.sleep(for: availabilityRetryDelay) }
+            catch {
+                if generation == id { loading = false }
+                return nil
+            }
+            guard generation == id else { return nil }
+            status = await check(code)
+            guard generation == id else { return nil }
+            guard !Task.isCancelled else { loading = false; return nil }
+        }
+        return status
+    }
+
+    private func activate(_ group: LyricsTranslationPlan.Group, target: Locale.Language = TranslationModels.target) {
+        // Publish only after availability checks finish. Clearing configuration
+        // while awaiting would cancel the translation task performing the check.
+        var next = lastConfiguration ?? TranslationSession.Configuration(source: group.source, target: target)
+        next.source = group.source
+        next.target = target
+        next.invalidate()
+        lastConfiguration = next
+        configuration = next
+    }
+
+    func refreshMissingModels(_ input: LyricsTranslationInput) async {
+        guard enabled, activeInput == input, !loading, configuration == nil,
+              !missingLanguages.isEmpty, let plan else { return }
+        let id = generation
+        for code in missingLanguages {
+            let status = await (availabilityCheck ?? TranslationModels.status)(code)
+            guard generation == id, enabled, activeInput == input, !Task.isCancelled,
+                  !loading, configuration == nil else { return }
+            guard status == .installed else { continue }
+            let groups = plan.groups(excluding: Set(translatedParts.keys)).filter {
+                $0.requests.first?.sourceLanguage == code
+            }
+            guard let group = groups.first else { continue }
+            pending = groups
+            runningGeneration = nil
+            loading = true
+            message = nil
+            missingLanguages.removeAll { $0 == code }
+            // No suspension after publishing: the view's monitoring task may
+            // cancel itself when missingLanguages/loading changes.
+            activate(group)
+            return
+        }
     }
 
     func translate(_ input: LyricsTranslationInput, using session: TranslationSession,
@@ -130,8 +183,9 @@ final class LyricsTranslationStore: ObservableObject {
               runningGeneration != generation, let group = pending.first else { return }
         let id = generation
         runningGeneration = id
-        guard let source = group.source,
-              await LanguageAvailability().status(from: source, to: TranslationModels.target) == .installed else {
+        guard let source = group.source, let code = group.requests.first?.sourceLanguage,
+              let status = await confirmedAvailability(code, generation: id) else { return }
+        guard status == .installed else {
             runningGeneration = nil
             await prepareNextGroup(generation: id)
             return
@@ -165,6 +219,10 @@ final class LyricsTranslationStore: ObservableObject {
         while let group = pending.first {
             await process(group, generation: id, perform: perform)
             guard generation == id, !Task.isCancelled else { return }
+            if availabilityCheck != nil {
+                await prepareNextGroup(generation: id)
+                guard generation == id, !Task.isCancelled else { return }
+            }
         }
         runningGeneration = nil
         finish()
@@ -208,7 +266,7 @@ final class LyricsTranslationStore: ObservableObject {
     private func finish() {
         loading = false
         configuration = nil
-        completed = translations.count == plan?.lines.count
+        completed = plan.map { plan in plan.requests.allSatisfy { translatedParts[$0.key] != nil } } ?? false
         message = completed ? nil : (failures.first ?? "部分歌詞未完成翻譯，請重試。")
         if !missingLanguages.isEmpty {
             message = "需要下載\(missingLanguages.map(TranslationModels.name).joined(separator: "、"))翻譯模型"
@@ -238,6 +296,12 @@ struct TranslatedLyricsContent<Content: View>: View {
     private struct Request: Equatable {
         let enabled: Bool
         let retry: Int
+    }
+
+    private struct ModelRefreshRequest: Equatable {
+        let active: Bool
+        let loading: Bool
+        let languages: [String]
     }
 
     var body: some View {
@@ -276,6 +340,18 @@ struct TranslatedLyricsContent<Content: View>: View {
         .translationTask(configuration) { session in
             guard let configuration else { return }
             await store.translate(input, using: session, configuration: configuration)
+        }
+        .task(id: ModelRefreshRequest(active: enabled && scenePhase == .active,
+                                     loading: store.loading, languages: store.missingLanguages)) {
+            guard enabled, scenePhase == .active, !store.loading, !store.missingLanguages.isEmpty else { return }
+            // Recover delayed system readiness while the player is visible.
+            // Bound polling so genuinely missing models do not keep being queried.
+            for seconds in [1, 2, 4, 8] {
+                do { try await Task.sleep(for: .seconds(seconds)) }
+                catch { return }
+                await store.refreshMissingModels(input)
+                guard !Task.isCancelled else { return }
+            }
         }
         .onDisappear { store.cancel() }
         .onAppear { retry += 1 }

@@ -19,12 +19,20 @@ final class WidgetSnapshotPublisher: ObservableObject {
     func update(spotify: SpotifyConnection, lyrics: PhoneLyricsStore, force: Bool = false) {
         // Keep the last widget snapshot on a cold launch before the user reconnects.
         guard spotify.connected else { return }
-        guard let track = spotify.track, let id = track.id else { clear(); return }
+        guard let track = spotify.track, let id = track.id else {
+            clear(controlID: spotify.playbackControlID, checkingControl: true)
+            return
+        }
         let document = lyrics.displayedTrackID == id ? lyrics.document : nil
         guard var snapshot = Self.snapshot(track: track, document: document, readings: lyrics.readings,
                                            position: spotify.playbackPosition(at: Date()),
                                            date: spotify.lastPlaybackSync ?? Date()) else { return }
         snapshot.authorizationID = try? KeychainSessionStorage().read()?.id
+        snapshot.controlID = spotify.playbackControlID
+        snapshot.isPlaying = spotify.isPlaying
+        // Persist the position at updatedAt, not the position extrapolated for
+        // this view render. Widget pause/restore uses this shared time anchor.
+        snapshot.positionMS = spotify.progressMS
         if spotify.canPredictPlayback, let sampledAt = spotify.lastPlaybackSync, let position = spotify.progressMS {
             snapshot.playbackEndsAt = sampledAt.addingTimeInterval(max(0, Double(track.duration_ms) - position) / 1000)
         }
@@ -80,14 +88,16 @@ final class WidgetSnapshotPublisher: ObservableObject {
         } catch { self.error = "小工具更新失敗，請稍後再試。" }
     }
 
-    func clear() {
+    func clear(controlID: UUID? = nil, checkingControl: Bool = false) {
         guard !hasCleared else { return }
-        artworkTask?.cancel()
-        artworkTask = nil
-        artworkKey = nil
-        artworkData = nil
         do {
-            try storage.clear()
+            if checkingControl {
+                guard try storage.clearPlayback(controlID: controlID) else { return }
+            } else { try storage.clear() }
+            artworkTask?.cancel()
+            artworkTask = nil
+            artworkKey = nil
+            artworkData = nil
             lastSnapshot = nil
             hasCleared = true
             error = nil
