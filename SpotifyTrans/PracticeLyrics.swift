@@ -7,12 +7,18 @@ enum PracticeHighlight: String, CaseIterable, Identifiable {
     var title: String { self == .words ? "逐詞" : "逐字／音節" }
 }
 
-// The provider supplies line timestamps. These subdivisions are visual estimates,
-// not measured vocal alignment or pronunciation scores.
+// Experimental text subdivision only. The player deliberately does not use this
+// estimate: line timestamps cannot establish vocal activity, pauses, or word ends.
+// Retained for testing tokenization; never enable it as measured karaoke timing.
 struct PracticeLyricsPlan {
     struct Token: Equatable {
         let text: String
-        var weight: Double { Double(text.filter { $0.isLetter || $0.isNumber }.count) }
+        let weight: Double
+
+        init(text: String, weight: Double? = nil) {
+            self.text = text
+            self.weight = weight ?? (text.contains { $0.isLetter || $0.isNumber } ? 1 : 0)
+        }
     }
     struct Line {
         let start: Double
@@ -38,9 +44,9 @@ struct PracticeLyricsPlan {
             let next = document.lines.dropFirst(index + 1).compactMap(\.startTimeMS).first { $0 > start }
             let end = min(next ?? durationMS, durationMS)
             guard end.isFinite, end > start else { continue }
-            result[line.id] = Line(start: start, end: end,
-                original: Self.tokens(line.words, highlight: highlight),
-                reading: Self.tokens(readings[line.id] ?? "", highlight: highlight, japaneseReading: japanese))
+            let paired = Self.pairedTokens(original: line.words, reading: readings[line.id] ?? "",
+                                           highlight: highlight, language: language, japanese: japanese)
+            result[line.id] = Line(start: start, end: end, original: paired.original, reading: paired.reading)
         }
         lines = result
     }
@@ -49,17 +55,84 @@ struct PracticeLyricsPlan {
         guard !text.isEmpty else { return [] }
         let tokenizer = NLTokenizer(unit: .word)
         tokenizer.string = text
-        var pieces: [String] = []
+        var pieces: [Token] = []
         var cursor = text.startIndex
         tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
-            if cursor < range.lowerBound { pieces.append(String(text[cursor..<range.lowerBound])) }
+            if cursor < range.lowerBound { pieces.append(Token(text: String(text[cursor..<range.lowerBound]), weight: 0)) }
             let word = String(text[range])
-            pieces += highlight == .words ? [word] : syllables(word, japaneseReading: japaneseReading)
+            let units = syllables(word, japaneseReading: japaneseReading).map {
+                Token(text: $0, weight: unitWeight($0, japaneseReading: japaneseReading))
+            }
+            pieces += highlight == .words ? [Token(text: word, weight: units.reduce(0) { $0 + $1.weight })] : units
             cursor = range.upperBound
             return true
         }
-        if cursor < text.endIndex { pieces.append(String(text[cursor...])) }
-        return pieces.map { Token(text: $0) }
+        if cursor < text.endIndex { pieces.append(Token(text: String(text[cursor...]), weight: 0)) }
+        return pieces
+    }
+
+    // Match the displayed reading before sharing timing. A corrected or ambiguous
+    // reading must never be silently replaced by a newly generated transcription.
+    private static func pairedTokens(original: String, reading: String, highlight: PracticeHighlight,
+                                     language: LyricsLanguage, japanese: Bool) -> (original: [Token], reading: [Token]) {
+        let engine = LyricsRomanizer()
+        var source: [Token] = []
+        var generated: [Token] = []
+        for word in tokens(original, highlight: .words) {
+            guard word.weight > 0 else { source.append(word); generated.append(word); continue }
+            let converted = engine.romanize(word.text, language: language, japaneseContext: japanese) ?? word.text
+            let isJapanese = !engine.japaneseRanges(in: word.text, language: language, japaneseContext: japanese).isEmpty
+            let spoken = tokens(converted, highlight: highlight, japaneseReading: isJapanese)
+            let duration = spoken.reduce(0) { $0 + $1.weight }
+            generated += spoken
+            if highlight == .words {
+                source.append(Token(text: word.text, weight: duration))
+            } else {
+                let units = tokens(word.text, highlight: .syllables)
+                let hanCount = units.filter { $0.text.range(of: #"\p{Han}"#, options: .regularExpression) != nil }.count
+                let otherWeight = units.filter { $0.text.range(of: #"\p{Han}"#, options: .regularExpression) == nil }
+                    .reduce(0) { $0 + $1.weight }
+                // Keep kana beats intact; a compound's remaining reading is shared
+                // across its kanji because the provider has no per-character timing.
+                let weights = units.map { unit in
+                    hanCount > 0 && unit.text.range(of: #"\p{Han}"#, options: .regularExpression) != nil
+                        ? max(1, (duration - otherWeight) / Double(hanCount)) : unit.weight
+                }
+                let total = weights.reduce(0, +)
+                source += zip(units, weights).map { Token(text: $0.0.text, weight: total > 0 ? $0.1 * duration / total : 0) }
+            }
+        }
+        if let aligned = alignedReading(reading, with: generated) { return (source, aligned) }
+        return (source, tokens(reading, highlight: highlight, japaneseReading: japanese))
+    }
+
+    private static func alignedReading(_ text: String, with generated: [Token]) -> [Token]? {
+        func key(_ text: String) -> String { String(text.lowercased().filter { $0.isLetter || $0.isNumber }) }
+        guard key(text) == key(generated.map(\.text).joined()) else { return nil }
+        let letters = text.indices.filter { text[$0].isLetter || text[$0].isNumber }
+        var offset = 0
+        var cursor = text.startIndex
+        var result: [Token] = []
+        for token in generated {
+            let count = token.text.filter { $0.isLetter || $0.isNumber }.count
+            guard count > 0 else { continue }
+            guard offset + count <= letters.count else { return nil }
+            let start = letters[offset]
+            let end = text.index(after: letters[offset + count - 1])
+            if cursor < start { result.append(Token(text: String(text[cursor..<start]), weight: 0)) }
+            result.append(Token(text: String(text[start..<end]), weight: token.weight))
+            cursor = end
+            offset += count
+        }
+        guard offset == letters.count else { return nil }
+        if cursor < text.endIndex { result.append(Token(text: String(text[cursor...]), weight: 0)) }
+        return result
+    }
+
+    private static func unitWeight(_ text: String, japaneseReading: Bool) -> Double {
+        guard text.contains(where: { $0.isLetter || $0.isNumber }) else { return 0 }
+        // A macron represents two morae even though it is one displayed grapheme.
+        return japaneseReading && text.lowercased().contains(where: { "āēīōūâêîôû".contains($0) }) ? 2 : 1
     }
 
     private static func syllables(_ word: String, japaneseReading: Bool) -> [String] {
@@ -75,17 +148,26 @@ struct PracticeLyricsPlan {
             }
             return pieces
         }
-        let vowels = Set("aeiouyāēīōūáéíóúàèìòùäëïöüâêîôû")
+        let vowels = Set("aeiouāēīōūáéíóúàèìòùäëïöüâêîôû")
         let lower = Array(word.lowercased())
         guard lower.count == chars.count else { return [word] }
         var boundaries: [Int] = []
         if japaneseReading {
-            for index in lower.indices where vowels.contains(lower[index]) && index + 1 < chars.count {
-                // Romanized Japanese uses mora-like chunks (se / ka / i).
-                boundaries.append(index + 1)
+            for index in lower.indices where index + 1 < chars.count {
+                let current = lower[index]
+                let next = lower[index + 1]
+                // Contracted sounds (kya / shu) are one beat. Syllabic n and
+                // doubled consonants each occupy their own beat (ga / k / ko / u).
+                if vowels.contains(current)
+                    || (current == "n" && !vowels.contains(next) && next != "y" && next != "n")
+                    || (current == next && !vowels.contains(current))
+                    || (current == "t" && next == "c" && index + 2 < chars.count && lower[index + 2] == "h") {
+                    boundaries.append(index + 1)
+                }
             }
         } else {
-            let starts = lower.indices.filter { vowels.contains(lower[$0]) && ($0 == 0 || !vowels.contains(lower[$0 - 1])) }
+            let latinVowels = vowels.union(["y"])
+            let starts = lower.indices.filter { latinVowels.contains(lower[$0]) && ($0 == 0 || !latinVowels.contains(lower[$0 - 1])) }
             for start in starts.dropFirst() {
                 // Approximate Latin syllables; never claim phonetic alignment.
                 if start == lower.count - 1, lower[start] == "e", lower[start - 1] != "l" { continue }
@@ -136,6 +218,7 @@ struct PracticeText: View {
 
     var body: some View {
         Text(attributed)
+            .accessibilityIdentifier("estimated-practice-text")
             .font(.system(size: size, weight: reading ? .medium : .semibold))
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel(tokens.map(\.text).joined())

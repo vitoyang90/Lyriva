@@ -73,6 +73,28 @@ struct SpotifyTransTests {
         }
     }
 
+    @Test func ichidoUsesTheWholePhraseWithoutChangingOtherCounters() {
+        let engine = LyricsRomanizer()
+        for (source, expected) in [
+            ("もう一度", "mou ichido"), ("もういちど", "mou ichido"),
+            ("もう一度だけ", "mou ichido dake"), ("もう一度会いたい", "mou ichido ai tai"),
+            ("もう一度出会えたら", "mou ichido deae tara"),
+            ("一度だけ", "ichido dake"), ("一度に", "ichido ni"),
+            ("もう一度、もう一度", "mou ichido、mou ichido"),
+            ("Hello もう一度!", "Hello mou ichido!"),
+            ("もう一人", "mou hitori"), ("もうひとたび", "mou hitotabi"),
+            ("hito もう一度", "hito mou ichido")
+        ] {
+            for language in [LyricsLanguage.japanese, .automatic] {
+                let result = engine.convert(source, language: language)[0]
+                #expect(result.romanization == expected)
+                #expect(result.original == source)
+            }
+        }
+        #expect(engine.convert("十一度", language: .japanese)[0].romanization?.hasSuffix(" ichido") == false)
+        #expect(engine.convert("mou hito", language: .japanese)[0].romanization == nil)
+    }
+
     @MainActor @Test func topicParticleCorrectionReachesPhoneLyrics() async {
         let store = PhoneLyricsStore(fetch: { _ in
             LyricsDocument(lines: [.init(id: 42, words: "君は花を", startTimeMS: 1000)], isSynced: true)

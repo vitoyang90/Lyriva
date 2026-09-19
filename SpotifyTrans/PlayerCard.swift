@@ -77,6 +77,17 @@ struct SpotifyConnectionView: View {
                 if spotify.requiresReauthorization {
                     Button("更新 Spotify 授權", action: openSettings).buttonStyle(StudioButton())
                 }
+                Text("播放裝置：\(spotify.playbackDeviceName ?? "沿用 Spotify 目前裝置")")
+                    .font(.caption).foregroundStyle(Studio.muted)
+                    .accessibilityIdentifier("playback-device")
+                if spotify.needsPlaybackDevicePermission && !spotify.requiresReauthorization {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Button("更新播放裝置權限") { spotify.connect(clientID: spotify.savedClientID) }
+                            .disabled(spotify.busy)
+                        Text("只需更新一次，即可辨識手機或電腦；切歌沿用已保存的授權。")
+                            .font(.caption).foregroundStyle(Studio.muted)
+                    }
+                }
                 if setListeningMode != nil {
                     listeningModePicker
                 }

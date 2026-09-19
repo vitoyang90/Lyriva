@@ -78,6 +78,50 @@ struct ReadingReviewTests {
         #expect(output == "ashita wa hana o")
     }
 
+    @Test func songSpecificReadingsOfferWholeWordChoices() throws {
+        let source = "永遠に、もう一度だけ永遠に"
+        let found = issues(source)
+        let eternal = found.filter { $0.original == "永遠" }
+        #expect(eternal.count == 2)
+        #expect(eternal.allSatisfy { $0.candidates.map(\.reading) == ["eien", "towa"] })
+        let first = try #require(eternal.first)
+        let output = LyricsRomanizer().romanize(source, language: .japanese, japaneseContext: true,
+            overrides: [try #require(first.replacement(for: "reading:towa"))])
+        #expect(output == "towa ni、mou ichido dake eien ni")
+        let once = try #require(found.first { $0.original == "一度" })
+        #expect(once.current == "ichido")
+        #expect(once.candidates.map(\.reading) == ["ichido", "hitotabi"])
+        let vow = "永遠の誓い"
+        let vowIssue = try #require(issues(vow).first { $0.original == "永遠" })
+        #expect(LyricsRomanizer().romanize(vow, language: .japanese, japaneseContext: true,
+            overrides: [try #require(vowIssue.replacement(for: "reading:towa"))]) == "towa no chikai")
+        #expect(!issues("永遠性と十一度").contains { ["永遠", "一度"].contains($0.original) })
+        #expect(!issues("永遠愛你", language: .automatic).contains { $0.original == "永遠" })
+    }
+
+    @Test @MainActor func towaChoicePersistsOnlyForTheSelectedSongAndIchidoIsAutomatic() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let source = "永遠に、もう一度"
+        let lyrics = document(source)
+        let store = PhoneLyricsStore(preferences: ReadingPreferences(file: file), fetch: { _ in lyrics })
+        await store.load(trackID: "towa-song", language: .automatic)
+        #expect(store.readings[42] == "eien ni、mou ichido")
+        let issue = try #require(store.readingIssues[42]?.first { $0.original == "永遠" })
+        await store.chooseReading("reading:towa", issueID: issue.id, lineID: 42,
+                                  trackID: "towa-song", originalLine: source)
+        #expect(store.readings[42] == "towa ni、mou ichido")
+        #expect(store.document?.lines.first?.words == source)
+        let reloaded = PhoneLyricsStore(preferences: ReadingPreferences(file: file), fetch: { _ in lyrics })
+        await reloaded.load(trackID: "towa-song", language: .automatic)
+        #expect(reloaded.readings[42] == "towa ni、mou ichido")
+        await reloaded.load(trackID: "eien-song", language: .automatic)
+        #expect(reloaded.readings[42] == "eien ni、mou ichido")
+        await store.chooseReading(nil, issueID: issue.id, lineID: 42,
+                                  trackID: "towa-song", originalLine: source)
+        #expect(store.readings[42] == "eien ni、mou ichido")
+    }
+
     @Test @MainActor func choicesPersistRestoreAndDoNotLeakToOtherSongs() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

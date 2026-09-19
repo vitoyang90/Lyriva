@@ -35,7 +35,9 @@ enum LandscapeUITestFixture {
 
 private struct FixtureSessionStorage: SpotifySessionStorage {
     private let value = SpotifySession(id: UUID(), clientID: "ui-fixture", accessToken: "local-only",
-                                      refreshToken: "local-only", expiresAt: .distantFuture)
+        refreshToken: "local-only", expiresAt: .distantFuture,
+        scopes: ProcessInfo.processInfo.arguments.contains("--favorite-playback-ui-fixture")
+            ? ["user-read-playback-state", "user-modify-playback-state"] : nil)
     func read() -> SpotifySession? { value }
     func update(_ mutation: (inout SpotifySession?) throws -> Void) throws {
         var copy: SpotifySession? = value
@@ -49,19 +51,23 @@ private final class LandscapePlaybackProtocol: URLProtocol, @unchecked Sendable 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
-        let isPlayback = request.url?.path == "/v1/me/player/currently-playing"
+        let isPlayback = request.httpMethod == "GET" &&
+            ["/v1/me/player/currently-playing", "/v1/me/player"].contains(request.url?.path ?? "")
+        let isDevices = request.url?.path == "/v1/me/player/devices"
         let body: Data
-        if ProcessInfo.processInfo.arguments.contains("--spotify-queue-ui-fixture") {
+        if isDevices {
+            body = Data(#"{"devices":[{"id":"fixture-phone","name":"iPhone","is_active":false,"is_restricted":false},{"id":"fixture-computer","name":"Mac","is_active":true,"is_restricted":false}]}"#.utf8)
+        } else if ProcessInfo.processInfo.arguments.contains("--spotify-queue-ui-fixture") {
             body = Self.spotifyQueue.response(to: request)
         } else if ProcessInfo.processInfo.arguments.contains("--favorite-playback-ui-fixture") {
             body = Self.favoritePlayback.response(to: request)
         } else {
             body = Data(#"{"currently_playing_type":"track","is_playing":false,"progress_ms":22000,"item":{"id":"landscape-fixture-song","duration_ms":180000,"name":"Landscape Session","artists":[{"name":"Lyriva Studio"}],"external_urls":{}}}"#.utf8)
         }
-        let response = HTTPURLResponse(url: request.url!, statusCode: isPlayback ? 200 : 204,
+        let response = HTTPURLResponse(url: request.url!, statusCode: isPlayback || isDevices ? 200 : 204,
                                        httpVersion: nil, headerFields: nil)!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        if isPlayback { client?.urlProtocol(self, didLoad: body) }
+        if isPlayback || isDevices { client?.urlProtocol(self, didLoad: body) }
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
@@ -120,11 +126,14 @@ private final class FavoriteFixturePlayback: @unchecked Sendable {
             let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
             selected = json?["uris"] as? [String] == ["spotify:track:favorite-fixture-song"]
                 && json?["position_ms"] as? Int == 0
+                && URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems?
+                    .first(where: { $0.name == "device_id" })?.value == "fixture-computer"
         }
         let id = selected ? "favorite-fixture-song" : "landscape-fixture-song"
         let title = selected ? "Favorite Session" : "Landscape Session"
         return Data("""
             {"currently_playing_type":"track","is_playing":\(selected),"progress_ms":\(selected ? 0 : 22000),
+             "device":{"id":"fixture-computer","name":"Mac","is_active":true,"is_restricted":false},
              "item":{"id":"\(id)","duration_ms":180000,"name":"\(title)","artists":[{"name":"Lyriva Studio"}],"external_urls":{}}}
             """.utf8)
     }

@@ -85,7 +85,7 @@ struct SongLibraryPracticeTests {
         let line = try #require(plan.lines[1])
         #expect(line.progress(at: 999) == nil)
         #expect(PracticeLyricsPlan.activeToken(in: line.original, progress: line.progress(at: 1000)) == 0)
-        #expect(PracticeLyricsPlan.activeToken(in: line.original, progress: line.progress(at: 2200)) == 2)
+        #expect(PracticeLyricsPlan.activeToken(in: line.original, progress: line.progress(at: 2500)) == 2)
         // Seeking backward restores the first word.
         #expect(PracticeLyricsPlan.activeToken(in: line.original, progress: line.progress(at: 1200)) == 0)
         #expect(line.progress(at: 3000) == nil)
@@ -113,5 +113,57 @@ struct SongLibraryPracticeTests {
         #expect(PracticeLyricsPlan(document: unsynced, readings: [:], highlight: .syllables, durationMS: 10000, language: .automatic).lines.isEmpty)
         let invalid = LyricsDocument(lines: [.init(id: 0, words: "hello", startTimeMS: 20000)], isSynced: true)
         #expect(PracticeLyricsPlan(document: invalid, readings: [:], highlight: .words, durationMS: 10000, language: .automatic).lines.isEmpty)
+    }
+
+    @Test func syllablesUseSpokenBeatsInsteadOfSpellingLength() {
+        let japanese = PracticeLyricsPlan.tokens("shi a kyu", highlight: .syllables, japaneseReading: true)
+        #expect(japanese.filter { $0.weight > 0 }.map(\.weight) == [1, 1, 1])
+        #expect(PracticeLyricsPlan.activeToken(in: japanese, progress: 0.4) == 2)
+        for (text, expected) in [("gakkou", ["ga", "k", "ko", "u"]),
+                                 ("kanpai", ["ka", "n", "pa", "i"]),
+                                 ("issho", ["i", "s", "sho"]),
+                                 ("matcha", ["ma", "t", "cha"])] {
+            let tokens = PracticeLyricsPlan.tokens(text, highlight: .syllables, japaneseReading: true)
+            #expect(tokens.map(\.text) == expected)
+            #expect(tokens.allSatisfy { $0.weight == 1 })
+        }
+        let longVowel = PracticeLyricsPlan.tokens("kyō", highlight: .syllables, japaneseReading: true)
+        #expect(longVowel.map(\.text) == ["kyō"])
+        #expect(longVowel.first?.weight == 2)
+        let english = PracticeLyricsPlan.tokens("beautiful cat", highlight: .words)
+        #expect(english.filter { $0.weight > 0 }.map(\.weight) == [3, 1])
+    }
+
+    @Test func originalAndReadingShareWordBoundariesInBothModes() throws {
+        let original = "世界へ hello"
+        let reading = try #require(LyricsRomanizer().romanize(original, language: .japanese, japaneseContext: true))
+        let document = LyricsDocument(lines: [.init(id: 7, words: original, startTimeMS: 1000)], isSynced: true)
+        for mode in PracticeHighlight.allCases {
+            let plan = PracticeLyricsPlan(document: document, readings: [7: reading], highlight: mode,
+                                          durationMS: 7000, language: .japanese)
+            let line = try #require(plan.lines[7])
+            #expect(line.original.map(\.text).joined() == original)
+            #expect(line.reading.map(\.text).joined() == reading)
+            #expect(abs(line.original.reduce(0) { $0 + $1.weight } - line.reading.reduce(0) { $0 + $1.weight }) < 0.00001)
+            let sourceEnglish = try #require(line.original.firstIndex { $0.text.hasPrefix("hel") })
+            let readingEnglish = try #require(line.reading.firstIndex { $0.text.hasPrefix("hel") })
+            let beforeEnglish = line.original.prefix(sourceEnglish).reduce(0) { $0 + $1.weight }
+            #expect(beforeEnglish == line.reading.prefix(readingEnglish).reduce(0) { $0 + $1.weight })
+            let total = line.original.reduce(0) { $0 + $1.weight }
+            let progress = (beforeEnglish + 0.01) / total
+            #expect(PracticeLyricsPlan.activeToken(in: line.original, progress: progress) == sourceEnglish)
+            #expect(PracticeLyricsPlan.activeToken(in: line.reading, progress: progress) == readingEnglish)
+        }
+    }
+
+    @Test func differentReadingsAndPunctuationArePreserved() throws {
+        let document = LyricsDocument(lines: [.init(id: 1, words: "明日、きっと！", startTimeMS: 0)], isSynced: true)
+        for reading in ["asu、kitto!", "ashita,  kitto!", "", "👨‍👩‍👧‍👦"] {
+            let line = try #require(PracticeLyricsPlan(document: document, readings: [1: reading], highlight: .syllables,
+                                                       durationMS: 5000, language: .japanese).lines[1])
+            #expect(line.original.map(\.text).joined() == "明日、きっと！")
+            #expect(line.reading.map(\.text).joined() == reading)
+            #expect(line.reading.filter { !$0.text.contains { $0.isLetter || $0.isNumber } }.allSatisfy { $0.weight == 0 })
+        }
     }
 }

@@ -85,6 +85,7 @@ struct SpotifySession: Codable, Equatable, Sendable {
     var refreshToken: String
     var expiresAt: Date
     var needsAuthorization: Bool? = nil
+    var scopes: Set<String>? = nil
 }
 
 protocol SpotifySessionStorage: Sendable {
@@ -108,6 +109,7 @@ struct KeychainSessionStorage: SpotifySessionStorage {
 }
 
 actor SpotifyAuthorization {
+    static let playbackScopes = "user-read-currently-playing user-read-playback-state user-modify-playback-state"
     static let shared = SpotifyAuthorization()
     private let store: any SpotifySessionStorage
     private let session: URLSession
@@ -126,7 +128,8 @@ actor SpotifyAuthorization {
             "code_verifier": verifier, "client_id": clientID, "redirect_uri": redirectURI])
         guard let refresh = tokens.refresh_token, !refresh.isEmpty else { throw AuthorizationError.signedOut }
         let value = SpotifySession(id: UUID(), clientID: clientID, accessToken: tokens.access_token,
-            refreshToken: refresh, expiresAt: Date().addingTimeInterval(tokens.expires_in - 60))
+            refreshToken: refresh, expiresAt: Date().addingTimeInterval(tokens.expires_in - 60),
+            scopes: Set((tokens.scope ?? Self.playbackScopes).split(separator: " ").map(String.init)))
         try store.update { $0 = value }
     }
     func validSession() async throws -> SpotifySession {
@@ -154,6 +157,7 @@ actor SpotifyAuthorization {
         current.accessToken = tokens.access_token
         current.refreshToken = tokens.refresh_token ?? current.refreshToken
         current.expiresAt = Date().addingTimeInterval(tokens.expires_in - 60)
+        if let scope = tokens.scope { current.scopes = Set(scope.split(separator: " ").map(String.init)) }
         try store.update { value in
             // A response arriving after logout/relogin must never restore old credentials.
             guard value?.id == current.id else { throw AuthorizationError.signedOut }
@@ -172,6 +176,7 @@ actor SpotifyAuthorization {
         let access_token: String
         let refresh_token: String?
         let expires_in: Double
+        let scope: String?
     }
     private func request(_ fields: [String: String]) async throws -> Tokens {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")

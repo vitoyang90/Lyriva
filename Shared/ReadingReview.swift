@@ -46,7 +46,9 @@ struct ReadingReview {
         "上手": [.init(reading: "jouzu", hint: "擅長"), .init(reading: "uwate", hint: "佔上風、較高明"), .init(reading: "kamite", hint: "舞台上手等語境")],
         "上": [.init(reading: "ue", hint: "上方"), .init(reading: "kami", hint: "上游、上位等"), .init(reading: "jou", hint: "音讀，依語境")],
         "明日": [.init(reading: "ashita", hint: "明天，常見讀法"), .init(reading: "asu", hint: "明天"), .init(reading: "myounichi", hint: "較正式的讀法")],
-        "今日": [.init(reading: "kyou", hint: "今天"), .init(reading: "konnichi", hint: "今日、現今")]
+        "今日": [.init(reading: "kyou", hint: "今天"), .init(reading: "konnichi", hint: "今日、現今")],
+        "永遠": [.init(reading: "eien", hint: "常見讀法"), .init(reading: "towa", hint: "歌詞可能採用的唱法，依聽到的讀音選擇")],
+        "一度": [.init(reading: "ichido", hint: "一次；「もう一度」使用此讀法"), .init(reading: "hitotabi", hint: "一旦、一次，依語境與唱法")]
     ]
 
     func issues(document: LyricsDocument, readings: [Int: String], language: LyricsLanguage) -> [Int: [ReadingIssue]] {

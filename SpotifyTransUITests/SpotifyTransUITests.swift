@@ -6,6 +6,41 @@ final class SpotifyTransUITests: XCTestCase {
     }
 
     @MainActor
+    func testManualLyricsScrollingPausesUntilResumedOrTrackChanges() {
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication()
+        app.launchArguments = ["--landscape-ui-fixture", "--spotify-queue-ui-fixture",
+                               "-lyricsShowChinese", "NO", "-lyricsShowOriginal", "YES",
+                               "-lyricsShowRomanization", "YES"]
+        app.launch()
+        let lyrics = app.scrollViews["lyrics-scroll-view"]
+        let resume = app.buttons["resume-lyrics-follow"]
+        XCTAssertTrue(lyrics.waitForExistence(timeout: 10))
+        XCTAssertFalse(resume.exists) // Initial programmatic positioning must keep following.
+        lyrics.swipeUp()
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["lyrics-options-summary"].label.contains("自動捲動已暫停"))
+
+        // A display update must leave the user in manual reading mode.
+        app.buttons["open-lyrics-options"].tap()
+        let original = app.switches["原文"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5))
+        original.tap()
+        app.buttons["close-lyrics-options"].tap()
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        resume.tap()
+        XCTAssertTrue(resume.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["lyrics-options-summary"].label.contains("自動捲動"))
+
+        lyrics.swipeDown()
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        app.buttons["下一首"].tap()
+        XCTAssertTrue(app.staticTexts["Spotify Queue 2"].waitForExistence(timeout: 5))
+        XCTAssertTrue(resume.waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
     func testReadingCandidatesCanBeSelectedAndRestored() {
         XCUIDevice.shared.orientation = .portrait
         let app = XCUIApplication()
@@ -70,6 +105,8 @@ final class SpotifyTransUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["收藏歌曲"].waitForNonExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Favorite Session"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.buttons["暫停"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["playback-device"].label.contains("Mac"))
+        XCTAssertFalse(app.buttons["更新播放裝置權限"].exists)
         XCTAssertFalse(app.staticTexts["Landscape Session"].exists)
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(app.scrollViews["landscape-player"].waitForExistence(timeout: 5))
@@ -138,7 +175,7 @@ final class SpotifyTransUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         defer { XCUIDevice.shared.orientation = .portrait }
         let app = XCUIApplication()
-        app.launchArguments = ["--landscape-ui-fixture", "-listeningMode", "normal"]
+        app.launchArguments = ["--landscape-ui-fixture", "-listeningMode", "normal", "-practiceHighlight", "syllables"]
         app.launch()
         let favorite = app.buttons["favorite-current-song"]
         XCTAssertTrue(favorite.waitForExistence(timeout: 8))
@@ -165,16 +202,19 @@ final class SpotifyTransUITests: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(app.scrollViews["landscape-player"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["practice-timing-note"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["practice-timing-note"].label.contains("缺少逐字時間"))
+        // A saved syllable setting cannot revive synthetic singing in line-only lyrics.
+        XCTAssertFalse(app.staticTexts["estimated-practice-text"].exists)
         let practice = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        practice.name = "練唱估算反白"
+        practice.name = "只有整句時間時的跟唱定位"
         practice.lifetime = .keepAlways
         add(practice)
         app.buttons["open-lyrics-options"].tap()
         XCTAssertTrue(app.navigationBars["歌詞選項"].waitForExistence(timeout: 5))
-        reveal(app.buttons["practice-highlight-picker"], in: app)
-        app.buttons["practice-highlight-picker"].tap()
-        app.buttons["逐字／音節"].tap()
-        XCTAssertEqual(app.buttons["practice-highlight-picker"].value as? String, "逐字／音節")
+        XCTAssertFalse(app.buttons["practice-highlight-picker"].exists)
+        let timingExplanation = app.staticTexts["目前歌詞沒有逐字起訖時間，無法判斷句內停唱與間奏，因此不自動推算逐詞／音節反白。"]
+        reveal(timingExplanation, in: app)
+        XCTAssertTrue(timingExplanation.exists)
         app.buttons["close-lyrics-options"].tap()
         XCTAssertTrue(app.segmentedControls["listening-mode"].buttons["跟唱"].isSelected)
         app.buttons["open-favorites"].tap()

@@ -119,18 +119,40 @@ struct LyricsRomanizer {
         let tokenizer = CFStringTokenizerCreate(nil, source,
             CFRange(location: 0, length: source.length), kCFStringTokenizerUnitWord,
             NSLocale(localeIdentifier: "ja"))
-        var output = ""
-        var end = 0
+        var tokens: [(range: NSRange, reading: String?)] = []
         while !CFStringTokenizerAdvanceToNextToken(tokenizer).isEmpty {
             let range = CFStringTokenizerGetCurrentTokenRange(tokenizer)
+            tokens.append((NSRange(location: range.location, length: range.length),
+                           CFStringTokenizerCopyCurrentTokenAttribute(tokenizer,
+                            kCFStringTokenizerAttributeLatinTranscription) as? String))
+        }
+        let boundaries = Set(tokens.map { NSMaxRange($0.range) })
+        var output = ""
+        var end = 0
+        for token in tokens {
+            guard token.range.location >= end else { continue }
+            var range = token.range
+            var reading = token.reading
+            // Read a complete counter phrase before isolated 一 / 度 tokens.
+            // Require source-token boundaries and exclude larger Han compounds
+            // such as 十一度; never replace Latin "hito" or standalone 一.
+            for phrase in ["一度", "いちど"] {
+                let length = (phrase as NSString).length
+                let candidate = NSRange(location: range.location, length: length)
+                guard NSMaxRange(candidate) <= source.length,
+                      boundaries.contains(NSMaxRange(candidate)),
+                      source.substring(with: candidate) == phrase,
+                      source.substring(to: candidate.location).range(of: #"\p{Han}$"#, options: .regularExpression) == nil else { continue }
+                range = candidate
+                reading = "ichido"
+                break
+            }
             if range.location > end {
                 output += source.substring(with: NSRange(location: end, length: range.location - end))
             } else if !output.isEmpty {
                 output += " "
             }
             let original = source.substring(with: NSRange(location: range.location, length: range.length))
-            let reading = CFStringTokenizerCopyCurrentTokenAttribute(tokenizer,
-                kCFStringTokenizerAttributeLatinTranscription) as? String
             // Unknown names/characters can have an empty transcription. Never drop them.
             let transcription = reading.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 } ?? original
             // Correct source tokens, not Latin substrings: 葉 (ha), はな (hana),

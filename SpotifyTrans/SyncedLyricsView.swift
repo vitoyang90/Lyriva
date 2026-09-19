@@ -16,7 +16,8 @@ struct SyncedLyricsView: View {
     @AppStorage("lyricsShowChinese") private var showChinese = false
     @AppStorage("lyricsTranslationSourceLanguage") private var translationSourceLanguage = ""
     @State private var follow = true
-    @AppStorage("practiceHighlight") private var practiceHighlight = PracticeHighlight.words
+    @State private var browsingLyrics = false
+    private var shouldFollow: Bool { follow && !browsingLyrics }
     @AppStorage("lyricsPortraitTextSize") private var portraitTextSize = LyricsTextSize.medium
     @AppStorage("lyricsLandscapeTextSize") private var landscapeTextSize = LyricsTextSize.medium
     private var textSize: LyricsTextSize { landscape ? landscapeTextSize : portraitTextSize }
@@ -51,7 +52,7 @@ struct SyncedLyricsView: View {
                 Text(optionsSummary).font(.caption).foregroundStyle(Studio.muted)
                     .accessibilityIdentifier("lyrics-options-summary")
                 if listeningMode == .practice {
-                    Text(document.isSynced ? "估算反白 · 點歌詞可從該句重唱" : "此歌曲沒有時間標記，可閱讀練唱，暫不提供反白。")
+                    Text(document.isSynced ? "逐句定位 · 缺少逐字時間，暫不提供逐字反白。點歌詞可從該句重唱。" : "此歌曲沒有時間標記，可閱讀練唱，暫不提供反白。")
                         .font(.caption).foregroundStyle(Studio.muted).accessibilityIdentifier("practice-timing-note")
                 }
                 if !store.message.isEmpty {
@@ -94,7 +95,7 @@ struct SyncedLyricsView: View {
         .sheet(isPresented: $optionsShown) {
             LyricsOptionsView(showOriginal: $showOriginal, showRomanization: $showRomanization,
                               showChinese: $showChinese, language: $language, textSize: textSizeBinding,
-                              follow: $follow, practiceHighlight: $practiceHighlight,
+                              follow: $follow,
                               listeningMode: listeningMode, isSynced: store.document?.isSynced == true,
                               canReload: spotify.track != nil && !store.loading) { revision += 1 }
                 .presentationDetents(landscape ? [.large] : [.height(listeningMode == .practice ? 590 : 530), .large])
@@ -102,20 +103,25 @@ struct SyncedLyricsView: View {
         .sheet(item: $readingReview) { selection in
             ReadingReviewView(store: store, selection: selection)
         }
+        .onChange(of: spotify.track?.id) { _, trackID in
+            if trackID != nil { browsingLyrics = false }
+        }
         .task(id: LoadID(track: spotify.track?.id, language: language, revision: revision, login: loginRevision)) {
             await store.load(trackID: spotify.track?.id, language: language, revision: revision, loginRevision: loginRevision)
         }
     }
     private var optionsSummary: String {
         [showOriginal ? "原文" : nil, showRomanization ? "羅馬字" : nil,
-         showChinese ? "中文" : nil, (follow && store.document?.isSynced == true) ? "自動捲動" : nil]
+         showChinese ? "中文" : nil,
+         (follow && store.document?.isSynced == true) ? (browsingLyrics ? "自動捲動已暫停" : "自動捲動") : nil]
             .compactMap { $0 }.joined(separator: " · ")
     }
 
     private func lyrics(_ document: LyricsDocument, translations: [Int: String]) -> some View {
-        let plan = listeningMode == .practice ? PracticeLyricsPlan(document: document, readings: store.readings,
-            highlight: practiceHighlight, durationMS: Double(spotify.track?.duration_ms ?? 0), language: language) : nil
-        return TimelineView(.animation(minimumInterval: listeningMode == .practice ? 0.05 : 0.25,
+        // Line starts locate a lyric row; the gap until the next row is not a
+        // vocal interval. Never feed that gap into the estimated token animation,
+        // including when an older installation saved a words/syllables preference.
+        return TimelineView(.animation(minimumInterval: 0.25,
                                        paused: scenePhase != .active || !spotify.canPredictPlayback)) { context in
             let position = store.displayedTrackID == spotify.track?.id ? spotify.playbackPosition(at: context.date) : nil
             let active = position.flatMap { document.activeLine(at: $0) }
@@ -124,12 +130,10 @@ struct SyncedLyricsView: View {
                     LazyVStack(alignment: .leading, spacing: landscape ? 6 : 10) {
                         ForEach(document.lines) { line in
                             let issues = store.readingIssues[line.id] ?? []
-                            let practiceLine = plan?.lines[line.id]
                             let row = ReadingLine(original: line.words, reading: store.readings[line.id],
                                 translation: translations[line.id], showOriginal: showOriginal || !issues.isEmpty,
                                 showReading: showRomanization, active: active == line.id,
-                                size: textSize.points(landscape: landscape), compact: landscape,
-                                practiceLine: practiceLine, practiceProgress: practiceLine?.progress(at: position))
+                                size: textSize.points(landscape: landscape), compact: landscape)
                             VStack(alignment: .leading, spacing: 4) {
                                 Group {
                                     if document.isSynced,
@@ -159,31 +163,53 @@ struct SyncedLyricsView: View {
                     }.textSelection(.enabled).padding(.vertical, 12)
                 }
                 .scrollIndicators(.hidden)
+                .accessibilityIdentifier("lyrics-scroll-view")
+                .onScrollPhaseChange { _, phase in
+                    // Programmatic scrolling uses .animating; only a user's
+                    // drag suspends following, including its subsequent inertia.
+                    if phase == .interacting, follow, document.isSynced {
+                        browsingLyrics = true
+                    }
+                }
                 .frame(height: landscape ? nil : 430)
                 .frame(maxHeight: landscape ? .infinity : nil)
+                .overlay(alignment: .bottomTrailing) {
+                    if follow, browsingLyrics, document.isSynced {
+                        Button { browsingLyrics = false } label: {
+                            Label("回到目前歌詞", systemImage: "location.fill")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 14).frame(minHeight: 44)
+                                .background(Studio.raised, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("resume-lyrics-follow")
+                        .padding(8)
+                    }
+                }
                 .onChange(of: active) { _, id in
-                    guard follow, let id else { return }
+                    guard shouldFollow, let id else { return }
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) { proxy.scrollTo(id, anchor: .center) }
                 }
                 .onChange(of: translations.count) { _, _ in
-                    if follow, let active { proxy.scrollTo(active, anchor: .center) }
+                    if shouldFollow, let active { proxy.scrollTo(active, anchor: .center) }
                 }
                 .onChange(of: landscape) { _, _ in
-                    if follow, let active { proxy.scrollTo(active, anchor: .center) }
+                    if shouldFollow, let active { proxy.scrollTo(active, anchor: .center) }
                 }
                 .onChange(of: textSize) { _, _ in
-                    if follow, let active { proxy.scrollTo(active, anchor: .center) }
+                    if shouldFollow, let active { proxy.scrollTo(active, anchor: .center) }
                 }
                 .onChange(of: showOriginal) { _, _ in
-                    if follow, let active { proxy.scrollTo(active, anchor: .center) }
+                    if shouldFollow, let active { proxy.scrollTo(active, anchor: .center) }
                 }
                 .onChange(of: showRomanization) { _, _ in
-                    if follow, let active { proxy.scrollTo(active, anchor: .center) }
+                    if shouldFollow, let active { proxy.scrollTo(active, anchor: .center) }
                 }
-                .onChange(of: follow) { _, enabled in
+                .onChange(of: shouldFollow) { _, enabled in
                     if enabled, let active { proxy.scrollTo(active, anchor: .center) }
                 }
-                .onAppear { if follow, let active { proxy.scrollTo(active, anchor: .center) } }
+                .onChange(of: follow) { _, _ in browsingLyrics = false }
+                .onAppear { if shouldFollow, let active { proxy.scrollTo(active, anchor: .center) } }
             }
         }
     }

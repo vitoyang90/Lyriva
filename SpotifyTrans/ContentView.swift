@@ -91,6 +91,7 @@ struct ContentView: View {
         .foregroundStyle(Studio.ink).tint(Studio.accent).preferredColorScheme(.dark)
         .sheet(isPresented: $favoritesShown) {
             FavoriteSongsView(library: library, currentTrackID: spotify.track?.id) { song, mode in
+                PlaybackDiagnostics.record("favorite selected track=\(song.id) mode=\(mode.rawValue)")
                 favoritesShown = false
                 guard spotify.connected, !spotify.requiresReauthorization else { loginShown = true; return }
                 listeningSession = .favorite(trackID: song.id, mode: mode)
@@ -119,6 +120,7 @@ struct ContentView: View {
             }
         }
         .onChange(of: scenePhase) { _, phase in
+            PlaybackDiagnostics.record("scene phase=\(phase)")
             spotify.playbackStarter.sceneChanged(phase)
             if publishesWidgets, phase != .active { widgetPublisher.update(spotify: spotify, lyrics: phoneLyrics, force: true) }
         }

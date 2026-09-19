@@ -62,6 +62,8 @@ final class SpotifyPlaybackStarter: ObservableObject {
     private var requestedTrackID: String?
     private var commandAfterWake: SpotifyConnection.PlaybackCommand?
     private var startupFailureMessage: String?
+    private var mayRetryAcceptedSelection = false
+    private var emptySelectionPolls = 0
     private let confirmationTimeout: Duration
 
     init(authorizer: (any SpotifyPlaybackAuthorizing)? = nil, confirmationTimeout: Duration = .seconds(15)) {
@@ -70,6 +72,7 @@ final class SpotifyPlaybackStarter: ObservableObject {
     }
 
     func start(clientID: String, trackID: String? = nil) {
+        PlaybackDiagnostics.record("SDK wake requested track=\(trackID ?? "resume")")
         guard !isStarting else { return }
         guard !clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             message = "請先連接 Spotify。"
@@ -107,6 +110,7 @@ final class SpotifyPlaybackStarter: ObservableObject {
               url.path.isEmpty, url.user == nil, url.password == nil, url.port == nil,
               let authorized = authorizer.result(from: url) else { return false }
         if !authorized { startupFailureMessage = authorizer.failureMessage(from: url) }
+        PlaybackDiagnostics.record("SDK callback authorized=\(authorized)")
         // App Remote authorization is separate from our saved Web API login.
         // Even a denied SDK callback must poll and try the saved playback grant.
         beginPlaybackConfirmation()
@@ -140,13 +144,25 @@ final class SpotifyPlaybackStarter: ObservableObject {
         return commandAfterWake
     }
 
-    func confirmPlayback(trackID: String? = nil) {
+    func confirmPlayback(trackID: String? = nil, canRetrySelection: Bool = false) {
         reset()
         attempt = UUID()
         isStarting = true
         awaitingPlayback = true
         requestedTrackID = trackID
+        mayRetryAcceptedSelection = trackID != nil && canRetrySelection
         beginPlaybackConfirmation()
+    }
+
+    // A successful PUT only accepts the request. Spotify can subsequently stop
+    // the previous song and report no player. Retry the same selection once through
+    // the saved Web API session after two empty polls, without SDK authorization.
+    func takeTrackToRetryAfterEmptyPlayback(_ empty: Bool) -> String? {
+        guard isConfirmingPlayback, mayRetryAcceptedSelection, let requestedTrackID else { return nil }
+        emptySelectionPolls = empty ? emptySelectionPolls + 1 : 0
+        guard emptySelectionPolls >= 2 else { return nil }
+        mayRetryAcceptedSelection = false
+        return requestedTrackID
     }
 
     private func beginPlaybackConfirmation() {
@@ -159,7 +175,10 @@ final class SpotifyPlaybackStarter: ObservableObject {
         timeout = Task { [weak self, confirmationTimeout] in
             do { try await Task.sleep(for: confirmationTimeout) } catch { return }
             guard let self, self.attempt == id else { return }
-            self.finish(message: self.startupFailureMessage ?? "暫時無法取得播放狀態，將自動重試。", awaitingPlayback: true)
+            let failure = self.requestedTrackID == nil
+                ? "暫時無法取得播放狀態，將自動重試。"
+                : "尚未開始播放所選歌曲。請確認 Spotify 中這首歌可以播放，再從收藏重試。"
+            self.finish(message: self.startupFailureMessage ?? failure, awaitingPlayback: true)
         }
     }
 
@@ -175,6 +194,7 @@ final class SpotifyPlaybackStarter: ObservableObject {
     func reset() { finish(message: nil) }
 
     private func finish(message: String?, awaitingPlayback: Bool = false) {
+        PlaybackDiagnostics.record("confirmation finished message=\(message ?? "none") awaitingPlayback=\(awaitingPlayback)")
         timeout?.cancel()
         timeout = nil
         returnCheck?.cancel()
@@ -186,6 +206,8 @@ final class SpotifyPlaybackStarter: ObservableObject {
         commandAfterWake = nil
         startupFailureMessage = nil
         self.awaitingPlayback = awaitingPlayback
+        mayRetryAcceptedSelection = false
+        emptySelectionPolls = 0
         if !awaitingPlayback { requestedTrackID = nil }
         self.message = message
     }

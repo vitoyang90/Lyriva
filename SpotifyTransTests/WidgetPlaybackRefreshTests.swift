@@ -98,31 +98,6 @@ struct WidgetPlaybackRefreshTests {
         #expect(starter.message == nil)
     }
 
-    @Test @MainActor func deniedSDKCallbackStillPlaysSelectedFavoriteThroughWebAPI() async throws {
-        let store = MemorySessionStorage(value: credential(expired: false))
-        let authorizer = ReturningPlaybackAuthorizer()
-        let starter = SpotifyPlaybackStarter(authorizer: authorizer)
-        var commands = 0
-        WidgetAuthProtocol.handler = { request in
-            if request.httpMethod == "PUT" { commands += 1; return (commands == 1 ? 404 : 204, [:], Data()) }
-            let id = commands < 2 ? "old-song" : "chosen-song"
-            return (200, [:], Data("""
-                {"currently_playing_type":"track","is_playing":true,"progress_ms":0,
-                 "item":{"id":"\(id)","duration_ms":10000,"name":"Song","artists":[],"external_urls":{}}}
-                """.utf8))
-        }
-        let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
-            playbackSession: mockSession(), playbackStarter: starter)
-        await connection.playTrack(id: "chosen-song")
-        authorizer.callbackResult = false
-        #expect(starter.handleCallback(URL(string: "spotifytrans://callback#error=access_denied")!))
-        await connection.refresh(showActivity: false)
-        #expect(commands == 2)
-        #expect(connection.track?.id == "chosen-song")
-        #expect(connection.isPlaying)
-        #expect(starter.message == nil)
-    }
-
     @Test func widgetCommandsUseCorrectEndpointsAndMethods() async throws {
         let credential = credential(expired: false)
         let store = MemorySessionStorage(value: credential)
@@ -163,25 +138,6 @@ struct WidgetPlaybackRefreshTests {
         #expect(connection.isPlaying)
     }
 
-    @Test @MainActor func favoriteWithoutActiveDeviceWakesSpotifyWithSelectedTrackURI() async throws {
-        let store = MemorySessionStorage(value: credential(expired: false))
-        let authorizer = ReturningPlaybackAuthorizer()
-        let starter = SpotifyPlaybackStarter(authorizer: authorizer)
-        WidgetAuthProtocol.handler = { _ in (404, [:], Data()) }
-        let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
-            playbackSession: mockSession(), playbackStarter: starter)
-        await connection.playTrack(id: "chosen-song")
-        #expect(authorizer.trackURI == "spotify:track:chosen-song")
-        #expect(starter.isStarting)
-        starter.playbackObserved(isPlaying: true, hasTrack: true, trackID: "old-song")
-        #expect(starter.isStarting)
-        starter.playbackObserved(isPlaying: false, hasTrack: true, trackID: "chosen-song")
-        #expect(starter.isStarting)
-        starter.playbackObserved(isPlaying: true, hasTrack: true, trackID: "chosen-song")
-        #expect(!starter.isStarting)
-        #expect(starter.message == nil)
-    }
-
     @Test @MainActor func favoriteRetriesSameSelectionAfterUnauthorizedResponse() async throws {
         let store = MemorySessionStorage(value: credential(expired: false))
         let directory = try temporaryDirectory()
@@ -211,6 +167,177 @@ struct WidgetPlaybackRefreshTests {
         #expect(!connection.playbackStarter.isStarting)
     }
 
+    @Test @MainActor func favoritesFollowActiveComputerThenPhoneWithoutAuthorizingOrTransferring() async throws {
+        var saved = credential(expired: false)
+        saved.scopes = ["user-read-playback-state", "user-modify-playback-state"]
+        let store = MemorySessionStorage(value: saved)
+        let authorizer = ReturningPlaybackAuthorizer()
+        var active = "computer"
+        var song = "first"
+        var destinations: [String] = []
+        var requestedPaths: [String] = []
+        WidgetAuthProtocol.handler = { request in
+            let path = request.url!.path
+            requestedPaths.append(path)
+            if path == "/v1/me/player/devices" {
+                return (200, [:], Data("""
+                    {"devices":[
+                      {"id":"computer","name":"Mac","is_active":\(active == "computer"),"is_restricted":false},
+                      {"id":"phone","name":"iPhone","is_active":\(active == "phone"),"is_restricted":false}]}
+                    """.utf8))
+            }
+            if request.httpMethod == "PUT" {
+                #expect(path == "/v1/me/player/play") // Never transfer playback or pause the other device.
+                destinations.append(URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+                    .queryItems!.first { $0.name == "device_id" }!.value!)
+                return (204, [:], Data())
+            }
+            return (200, [:], Data("""
+                {"currently_playing_type":"track","is_playing":true,"progress_ms":0,
+                 "device":{"id":"\(active)","name":"\(active == "computer" ? "Mac" : "iPhone")","is_active":true,"is_restricted":false},
+                 "item":{"id":"\(song)","duration_ms":10000,"name":"Song","artists":[],"external_urls":{}}}
+                """.utf8))
+        }
+        let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
+            playbackSession: mockSession(), playbackStarter: SpotifyPlaybackStarter(authorizer: authorizer))
+        await connection.playTrack(id: song)
+        #expect(connection.playbackDeviceName == "Mac")
+        active = "phone"
+        song = "second"
+        await connection.playTrack(id: song)
+        #expect(connection.playbackDeviceName == "iPhone")
+        #expect(connection.track?.id == "second")
+        #expect(destinations == ["computer", "phone"])
+        #expect(requestedPaths == Array(repeating: ["/v1/me/player/devices", "/v1/me/player/play", "/v1/me/player"], count: 2).flatMap { $0 })
+        #expect(authorizer.calls == 0)
+        #expect(!connection.requiresReauthorization)
+        #expect(!connection.needsPlaybackDevicePermission)
+    }
+
+    @Test @MainActor func unavailableOrRestrictedActiveDeviceDoesNotStartAnotherDeviceOrAuthorization() async throws {
+        for devices in [
+            #"{"devices":[]}"#,
+            #"{"devices":[{"id":"phone","name":"iPhone","is_active":false,"is_restricted":false}]}"#,
+            #"{"devices":[{"id":"computer","name":"Mac","is_active":true,"is_restricted":true},{"id":"phone","name":"iPhone","is_active":false,"is_restricted":false}]}"#
+        ] {
+            var saved = credential(expired: false)
+            saved.scopes = ["user-read-playback-state"]
+            let store = MemorySessionStorage(value: saved)
+            let authorizer = ReturningPlaybackAuthorizer()
+            var puts = 0
+            WidgetAuthProtocol.handler = { request in
+                if request.httpMethod == "PUT" { puts += 1 }
+                return (200, [:], Data(devices.utf8))
+            }
+            let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
+                playbackSession: mockSession(), playbackStarter: SpotifyPlaybackStarter(authorizer: authorizer))
+            await connection.playTrack(id: "chosen")
+            #expect(puts == 0)
+            #expect(authorizer.calls == 0)
+            #expect(!connection.playbackStarter.isStarting)
+            #expect(!connection.requiresReauthorization)
+            #expect(connection.status.contains("裝置"))
+        }
+    }
+
+    @Test @MainActor func legacyFavoriteNoDeviceDoesNotAuthorizeOnEverySelection() async throws {
+        let store = MemorySessionStorage(value: credential(expired: false))
+        let authorizer = ReturningPlaybackAuthorizer()
+        var commands = 0
+        WidgetAuthProtocol.handler = { request in
+            #expect(request.httpMethod == "PUT")
+            commands += 1
+            return (404, [:], Data())
+        }
+        let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
+            playbackSession: mockSession(), playbackStarter: SpotifyPlaybackStarter(authorizer: authorizer))
+        await connection.playTrack(id: "first")
+        await connection.playTrack(id: "second")
+        #expect(commands == 2)
+        #expect(authorizer.calls == 0)
+        #expect(connection.needsPlaybackDevicePermission)
+        #expect(!connection.requiresReauthorization)
+        #expect(connection.status.contains("播放裝置"))
+    }
+
+    @Test @MainActor func missingDeviceScopeOffersUpgradeWithoutOpeningAuthorizationOrSendingPlayback() async throws {
+        var saved = credential(expired: false)
+        saved.scopes = ["user-read-playback-state"]
+        let store = MemorySessionStorage(value: saved)
+        let authorizer = ReturningPlaybackAuthorizer()
+        WidgetAuthProtocol.handler = { request in
+            #expect(request.url?.path == "/v1/me/player/devices")
+            return (403, [:], Data(#"{"error":{"message":"Insufficient client scope"}}"#.utf8))
+        }
+        let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
+            playbackSession: mockSession(), playbackStarter: SpotifyPlaybackStarter(authorizer: authorizer))
+        await connection.playTrack(id: "chosen")
+        #expect(connection.needsPlaybackDevicePermission)
+        #expect(!connection.requiresReauthorization)
+        #expect(authorizer.calls == 0)
+        #expect(try store.read() == saved)
+    }
+
+    @Test func playbackScopesSurviveTokenRefreshWithoutAnotherConsent() async throws {
+        let store = MemorySessionStorage(value: nil)
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var exchanges = 0
+        WidgetAuthProtocol.handler = { _ in
+            exchanges += 1
+            return (200, [:], Data(#"{"access_token":"saved","refresh_token":"refresh","expires_in":3600}"#.utf8))
+        }
+        let authorization = SpotifyAuthorization(store: store, session: mockSession(), lockDirectory: directory)
+        try await authorization.exchange(code: "code", verifier: "verifier", clientID: "client", redirectURI: SpotifyConnection.redirectURI)
+        let original = try await authorization.validSession()
+        #expect(original.scopes?.contains("user-read-playback-state") == true)
+        try await authorization.invalidate(original)
+        let refreshed = try await authorization.validSession()
+        #expect(refreshed.scopes == original.scopes)
+        #expect(exchanges == 2)
+    }
+
+    @Test @MainActor func activeDeviceLookupRefreshesExpiredAccessWithoutSDKAuthorization() async throws {
+        var saved = credential(expired: false)
+        saved.scopes = ["user-read-playback-state"]
+        let store = MemorySessionStorage(value: saved)
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let session = mockSession()
+        let authorizer = ReturningPlaybackAuthorizer()
+        var lookups = 0
+        var refreshes = 0
+        var commands = 0
+        WidgetAuthProtocol.handler = { request in
+            if request.url?.host == "accounts.spotify.com" {
+                refreshes += 1
+                return (200, [:], Data(#"{"access_token":"renewed","expires_in":3600}"#.utf8))
+            }
+            if request.url?.path == "/v1/me/player/devices" {
+                lookups += 1
+                if lookups == 1 { return (401, [:], Data()) }
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer renewed")
+                return (200, [:], Data(#"{"devices":[{"id":"mac","name":"Mac","is_active":true,"is_restricted":false}]}"#.utf8))
+            }
+            if request.httpMethod == "PUT" {
+                commands += 1
+                #expect(request.url?.query == "device_id=mac")
+                #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer renewed")
+                return (204, [:], Data())
+            }
+            return (200, [:], Data(#"{"currently_playing_type":"track","is_playing":true,"progress_ms":0,"item":{"id":"chosen","duration_ms":10000,"name":"Song","artists":[],"external_urls":{}}}"#.utf8))
+        }
+        let connection = SpotifyConnection(sessionStorage: store,
+            authorization: SpotifyAuthorization(store: store, session: session, lockDirectory: directory),
+            playbackSession: session, playbackStarter: SpotifyPlaybackStarter(authorizer: authorizer))
+        await connection.playTrack(id: "chosen")
+        #expect(lookups == 2)
+        #expect(refreshes == 1)
+        #expect(commands == 1)
+        #expect(authorizer.calls == 0)
+        #expect(connection.isPlaying)
+    }
+
     @Test @MainActor func repeatedUnauthorizedSelectionStopsAfterOneRetry() async throws {
         let store = MemorySessionStorage(value: credential(expired: false))
         let directory = try temporaryDirectory()
@@ -231,54 +358,6 @@ struct WidgetPlaybackRefreshTests {
         #expect(connection.requiresReauthorization)
         #expect(!connection.busy)
         #expect(!connection.playbackStarter.isStarting)
-    }
-
-    @Test @MainActor func favoriteIsSentAgainIfSpotifyWakesPlayingAnotherSong() async throws {
-        let store = MemorySessionStorage(value: credential(expired: false))
-        let authorizer = ReturningPlaybackAuthorizer()
-        let starter = SpotifyPlaybackStarter(authorizer: authorizer)
-        var commands = 0
-        WidgetAuthProtocol.handler = { request in
-            if request.httpMethod == "PUT" {
-                commands += 1
-                return (commands == 1 ? 404 : 204, [:], Data())
-            }
-            let id = commands < 2 ? "old-song" : "chosen-song"
-            return (200, [:], Data("""
-                {"currently_playing_type":"track","is_playing":true,"progress_ms":0,
-                 "item":{"id":"\(id)","duration_ms":10000,"name":"Song","artists":[],"external_urls":{}}}
-                """.utf8))
-        }
-        let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
-            playbackSession: mockSession(), playbackStarter: starter)
-        await connection.playTrack(id: "chosen-song")
-        starter.returnedWithoutCallback()
-        await connection.refresh(showActivity: false)
-        #expect(commands == 2)
-        #expect(authorizer.calls == 1)
-        #expect(connection.track?.id == "chosen-song")
-        #expect(connection.isPlaying)
-        #expect(!starter.isStarting)
-        await connection.refresh(showActivity: false)
-        #expect(commands == 2)
-    }
-
-    @Test @MainActor func favoriteDoesNotRestartIfWakeAlreadyPlayedSelection() async throws {
-        let store = MemorySessionStorage(value: credential(expired: false))
-        let starter = SpotifyPlaybackStarter(authorizer: ReturningPlaybackAuthorizer())
-        var commands = 0
-        WidgetAuthProtocol.handler = { request in
-            if request.httpMethod == "PUT" { commands += 1; return (404, [:], Data()) }
-            return (200, [:], Data(#"{"currently_playing_type":"track","is_playing":true,"progress_ms":2000,"item":{"id":"chosen-song","duration_ms":10000,"name":"Chosen","artists":[],"external_urls":{}}}"#.utf8))
-        }
-        let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
-            playbackSession: mockSession(), playbackStarter: starter)
-        await connection.playTrack(id: "chosen-song")
-        starter.returnedWithoutCallback()
-        await connection.refresh(showActivity: false)
-        #expect(commands == 1)
-        #expect(connection.progressMS == 2000)
-        #expect(!starter.isStarting)
     }
 
     @Test @MainActor func acceptedFavoriteWaitsForSelectedPlayingTrack() async throws {
@@ -306,24 +385,58 @@ struct WidgetPlaybackRefreshTests {
         #expect(commands == 1)
     }
 
-    @Test @MainActor func favoriteWakeRecoveryDoesNotRepeatedlyOpenSpotify() async throws {
+    @Test @MainActor func acceptedFavoriteWithEmptyPlayerRetriesWithoutSDKAuthorization() async throws {
+        for emptyCode in [204, 200] {
+            let store = MemorySessionStorage(value: credential(expired: false))
+            let authorizer = ReturningPlaybackAuthorizer()
+            let starter = SpotifyPlaybackStarter(authorizer: authorizer)
+            var commands = 0
+            WidgetAuthProtocol.handler = { request in
+                if request.httpMethod == "PUT" { commands += 1; return (204, [:], Data()) }
+                if commands == 1 {
+                    return (emptyCode, [:], Data(#"{"currently_playing_type":"track","is_playing":false,"progress_ms":0,"item":null}"#.utf8))
+                }
+                let id = commands == 0 ? "old-song" : "chosen-song"
+                return (200, [:], Data("""
+                    {"currently_playing_type":"track","is_playing":true,"progress_ms":0,
+                     "item":{"id":"\(id)","duration_ms":10000,"name":"Song","artists":[],"external_urls":{}}}
+                    """.utf8))
+            }
+            let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
+                playbackSession: mockSession(), playbackStarter: starter)
+            await connection.refresh(showActivity: false)
+            #expect(connection.isPlaying)
+            await connection.playTrack(id: "chosen-song")
+            #expect(connection.track == nil)
+            #expect(authorizer.calls == 0) // Allow the first transitional empty response.
+            await connection.refresh(showActivity: false)
+            #expect(authorizer.calls == 0)
+            #expect(commands == 2)
+            #expect(connection.track?.id == "chosen-song")
+            #expect(connection.isPlaying)
+            #expect(!starter.isStarting)
+            #expect(starter.message == nil)
+        }
+    }
+
+    @Test @MainActor func acceptedFavoriteRecoveryDoesNotKeepWakingSpotifyWhenPlayerStaysEmpty() async throws {
         let store = MemorySessionStorage(value: credential(expired: false))
         let authorizer = ReturningPlaybackAuthorizer()
         let starter = SpotifyPlaybackStarter(authorizer: authorizer)
         var commands = 0
         WidgetAuthProtocol.handler = { request in
-            if request.httpMethod == "PUT" { commands += 1; return (404, [:], Data()) }
+            if request.httpMethod == "PUT" { commands += 1 }
             return (204, [:], Data())
         }
         let connection = SpotifyConnection(sessionStorage: store, authorization: SpotifyAuthorization(store: store),
             playbackSession: mockSession(), playbackStarter: starter)
         await connection.playTrack(id: "chosen-song")
-        starter.returnedWithoutCallback()
         await connection.refresh(showActivity: false)
+        for _ in 0..<4 { await connection.refresh(showActivity: false) }
+        #expect(authorizer.calls == 0)
         #expect(commands == 2)
-        #expect(authorizer.calls == 1)
-        #expect(!starter.isStarting)
-        #expect(connection.status.contains("找不到播放裝置"))
+        #expect(starter.isConfirmingPlayback)
+        starter.reset()
     }
 
     @Test @MainActor func pausedWidgetEntryClearsLaunchErrorAndPreservesSongOnEmptyResponse() async throws {
@@ -1038,7 +1151,7 @@ struct WidgetPlaybackRefreshTests {
         WidgetAuthProtocol.handler = { _ in (403, [:], Data()) }
         await connection.seek(to: 4000, trackID: "seek-song")
         #expect(connection.progressMS == 9999)
-        #expect(connection.status.contains("Premium"))
+        #expect(connection.status.contains("不允許此播放操作"))
         #expect(!connection.busy)
         #expect(!connection.showingActivity)
     }

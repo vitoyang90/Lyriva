@@ -147,6 +147,23 @@ struct SpotifyPlaybackStarterTests {
         #expect(starter.message?.contains("正在開啟") == true)
         starter.reset()
     }
+
+    @Test func acceptedSelectionRecoveryRequiresConsecutiveEmptyPollsAndKeepsLatestSelection() {
+        let starter = SpotifyPlaybackStarter(authorizer: MockPlaybackAuthorizer())
+        starter.confirmPlayback(trackID: "first", canRetrySelection: true)
+        #expect(starter.takeTrackToRetryAfterEmptyPlayback(true) == nil)
+        #expect(starter.takeTrackToRetryAfterEmptyPlayback(false) == nil)
+        #expect(starter.takeTrackToRetryAfterEmptyPlayback(true) == nil)
+        starter.confirmPlayback(trackID: "latest", canRetrySelection: true)
+        #expect(starter.takeTrackToRetryAfterEmptyPlayback(true) == nil)
+        #expect(starter.takeTrackToRetryAfterEmptyPlayback(true) == "latest")
+        #expect(starter.takeTrackToRetryAfterEmptyPlayback(true) == nil)
+        starter.reset()
+        #expect(starter.takeTrackToRetryAfterEmptyPlayback(true) == nil)
+        starter.confirmPlayback(trackID: "after-wake", canRetrySelection: false)
+        for _ in 0..<3 { #expect(starter.takeTrackToRetryAfterEmptyPlayback(true) == nil) }
+        starter.reset()
+    }
 }
 
 @MainActor
