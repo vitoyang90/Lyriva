@@ -4,9 +4,17 @@ App 與小工具對外名稱已更新為 Lyriva。為沿用既有安裝、登入
 
 iOS 18.4+ 的 Spotify 跟唱 App。手機直接取得歌曲狀態與歌詞，在裝置上產生羅馬字，依播放進度反白與捲動。日常使用不需要電腦、Docker 或自架後端。
 
+## 歌詞優先主畫面
+
+- 歌詞標題旁的「展開歌詞」可切換全畫面閱讀，底部保留置中的播放控制；再按「收合歌詞」回到原版面。展開、收合與旋轉共用歌詞及閱讀狀態，不重新載入歌曲。
+
+- 直向將播放器固定在頂部，保留接近舊版的大封面、歌名與 64 點播放鍵，小螢幕適度縮小封面；歌詞填滿剩餘高度；整頁不再捲動，閱讀與自動跟隨都使用同一個歌詞捲動區。「回到目前歌詞」會平滑捲回播放中的句子；系統啟用「減少動態效果」時直接定位。
+- 點播放器的歌名／封面可展開完整歌曲、播放裝置、狀態與一般／跟唱模式；關閉後保留原本的歌詞閱讀位置。收藏、進度和上一首／播放／下一首仍在主畫面；播放／暫停鍵置中，上一首與下一首左右等距排列。
+- 橫向依實際可用寬高採左右欄，左欄寬度隨空間調整，歌詞使用右欄剩餘寬度與完整高度；較窄視窗回到上下排列。
+
 ## 介面
 
-採用墨綠深色背景、萊姆綠重點色、自訂播放器卡片與歌詞排版。播放器顯示 Spotify 回傳的專輯封面，缺少封面或載入失敗時顯示唱片圖案。主畫面僅提供 Spotify 播放控制及同步原文／羅馬字／繁體中文，首次啟動顯示獨立登入頁；已有登入資料時直接進入播放器，設定使用獨立頁面與原生返回導覽，保留帳號管理入口。沒有手動貼上或範例歌詞入口。
+採用墨綠深色背景、萊姆綠重點色、自訂播放器卡片與歌詞排版。播放器顯示 Spotify 回傳的專輯封面，缺少封面或載入失敗時顯示唱片圖案。主畫面僅提供 Spotify 播放控制及同步原文／羅馬字／繁體中文，首次使用依序顯示「用途介紹 → 連接 Spotify → 啟用歌詞（可稍後）→ 開始使用」；完成後直接進入播放器，授權過期或登出不重播介紹。升級時已有播放登入的使用者直接進播放器。設定使用獨立頁面與原生返回導覽，保留帳號管理入口。沒有手動貼上或範例歌詞入口。
 
 歌詞區右上角的「歌詞選項」開啟底部面板，集中設定原文／羅馬字／中文翻譯、歌詞語言、字級、自動捲動及重新載入歌詞。跟唱模式另外顯示時間資料的限制；播放操作、點歌詞跳播和每行讀音提示維持直接操作。橫向使用可捲動的完整面板，直向可向上展開。
 
@@ -42,11 +50,20 @@ iOS 18.4+ 的 Spotify 跟唱 App。手機直接取得歌曲狀態與歌詞，在
 
 ## 手機使用流程
 
-1. 在 Spotify Developer Dashboard 建立 App，設定 bundle ID `order.SpotifyTrans`、Redirect URI `spotifytrans://callback`。在 API/SDK 選項中勾選 iOS。Spotify 帳號需要符合開發模式資格。
-2. 用 Xcode 安裝 App，首次啟動會顯示登入頁，填入 Client ID 再按「連接 Spotify」。OAuth 只使用 PKCE，不需要 Client Secret。
-3. 手機安裝並登入 Spotify 後，回到主畫面按播放。App 先用已保存的 Web API 授權嘗試播放，不因尚未取得歌曲就要求額外授權。只有 Web API 回報沒有可用裝置時，才透過官方 Spotify iOS SDK 喚起手機 Spotify，嘗試接續上次播放，再用相同 Redirect URI 返回。首次可能需要同意 App Remote 授權；此額外授權未完成時，仍會用已保存的 Web API 連線確認狀態及嘗試播放，不清除原有登入。播放／暫停、上一首、下一首需要 Premium 與 `user-modify-playback-state` 權限。
-4. 在同一個登入頁接著按「啟用歌詞」，在 Spotify 網頁登入並進入播放器，再按「完成」。完成後按「開始使用」進入播放器，也可先略過歌詞設定。播放與歌詞首次仍需各完成一次授權，已有歌詞憑證時不再顯示登入按鈕。之後可由設定 → 管理 Spotify 帳號開啟此頁。
-5. App 取得目前歌曲的歌詞並轉寫。歌詞缺少時間標記時顯示一般閱讀模式；取詞失敗可重新登入來源或重試；App 僅提供自動同步歌詞。
+1. 首次啟動點「開始設定」，再點「連接 Spotify」，登入自己的 Spotify 帳號並同意授權。App 已內建 Client ID，使用者不需進入 Developer Dashboard。OAuth 沿用 PKCE，不使用 Client Secret。
+2. 接著選「啟用歌詞」：在 Spotify 網頁登入並進入播放器，再按「完成」。也可選「稍後設定」；略過時播放器顯示「歌詞尚未啟用」與啟用入口，不先嘗試取詞。播放和歌詞目前仍需要分別登入。
+3. 確認狀態後點「開始使用」進入播放器。取消授權／歌詞登入會留在原步驟；切換 App 或關閉後重開會恢復已保存的進度。被系統結束的 OAuth 視窗需重新發起，已完成的步驟不必重做。只有點「開始使用」才標記引導完成。
+4. 手機安裝並登入 Spotify 後，回到主畫面按播放。App 先用已保存的 Web API 授權嘗試播放；只有沒有可用裝置時才透過官方 Spotify iOS SDK 喚起 Spotify，並透過 `spotifytrans://callback` 返回。播放控制需要 Premium 與 `user-modify-playback-state` 權限。App Remote 授權未完成不會清除已有 Web API 登入。
+5. 日後由「設定 → Spotify 帳號」管理重新授權、歌詞登入及登出。歌詞缺少時間標記時顯示一般閱讀模式；取詞失敗可重試或更新歌詞登入。
+
+### 開發者建置設定
+
+- `Configuration/Spotify.xcconfig` 的 `SPOTIFY_CLIENT_ID` 是 App 的公開識別碼，透過 `Info.plist` 的 `SpotifyClientID` 提供給 App。Debug／Release 共用此設定，可用 Xcode 建置參數覆寫；不要加入 Client Secret。
+- Spotify Developer Dashboard 需設定 bundle ID `order.SpotifyTrans`、Redirect URI `spotifytrans://callback`，並勾選 iOS SDK。內建 Client ID 不會解除 Spotify 開發模式的使用者名單、配額或公開發佈資格限制。
+- 僅 Debug 的「開發者設定」可覆寫 Client ID；留白使用 App 設定。Release 不顯示輸入框、Developer Dashboard 連結，也不讀取 Debug 覆寫。
+- 既有 Session 的更新與重新授權沿用原 Client ID；不直接把舊 Token 換綁到新 ID。若要改用內建 ID，先登出再連接即可。
+- 引導步驟、歌詞稍後選擇與完成版本以一份 `lyriva.onboarding.progress` 保存於 UserDefaults，Token／Cookie 仍只放 Keychain。暫時無法讀取播放 Keychain 時等待重試，不誤判為首次安裝；已完成的引導不因讀取失敗而重設。
+- `OnboardingTests` 驗證進度恢復、舊登入遷移、憑證不可讀／失效、取消及錯誤回呼、原 Client ID 保留。`OnboardingUITests` 使用獨立 defaults 和本機模擬授權／歌詞登入，驗證取消、背景返回、重開、略過及完成；不使用真實帳號。真實 Spotify 系統登入和網頁登入仍須實機驗證。
 
 Spotify 官方 Web API 不提供歌詞。本機歌詞請求依據 spotify-lyrics-api 使用的非官方 Web Player 協定實作，不能直接讀取 Spotify App 的沙盒或 Cookie。若 Spotify 阻擋 WebView 登入、變更端點或協定，可能無法取得歌詞；目前尚未用使用者的真實帳號驗證。
 

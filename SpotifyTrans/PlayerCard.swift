@@ -4,6 +4,8 @@ struct SpotifyConnectionView: View {
     @ObservedObject var spotify: SpotifyConnection
     @ObservedObject var starter: SpotifyPlaybackStarter
     var compact = false
+    var landscape = false
+    var artworkSize: CGFloat = 100
     var listeningSession = ListeningSession.spotify(.normal)
     var setListeningMode: ((ListeningMode) -> Void)? = nil
     var isFavorite = false
@@ -11,8 +13,93 @@ struct SpotifyConnectionView: View {
     var openSettings: () -> Void
     @Environment(\.openURL) private var openURL
     @State private var spotifyUnavailable = false
+    @State private var detailsShown = false
 
     var body: some View {
+        Group {
+            if compact { compactPlayer } else { detailedPlayer }
+        }
+        .sheet(isPresented: $detailsShown) {
+            NavigationStack {
+                ScrollView {
+                    SpotifyConnectionView(spotify: spotify, starter: starter,
+                        listeningSession: listeningSession, setListeningMode: setListeningMode,
+                        isFavorite: isFavorite, toggleFavorite: toggleFavorite) {
+                            detailsShown = false
+                            openSettings()
+                        }
+                        .padding(18)
+                }
+                .background(Studio.background.ignoresSafeArea())
+                .navigationTitle("歌曲與播放資訊")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("完成") { detailsShown = false }
+                            .accessibilityIdentifier("close-player-details")
+                    }
+                }
+            }
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
+        }
+    }
+
+    private var compactPlayer: some View {
+        VStack(spacing: landscape ? 8 : 12) {
+            Button { detailsShown = true } label: {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: landscape ? 4 : 8) {
+                        Text(spotify.track?.name ?? (spotify.connected ? "尚未播放" : "連接 Spotify"))
+                            .font(.system(landscape ? .headline : .title2, design: .rounded, weight: .bold))
+                            .foregroundStyle(Studio.ink).lineLimit(2)
+                        Text(spotify.track?.artists.map(\.name).joined(separator: " · ") ?? "播放歌曲後顯示歌詞")
+                            .font(landscape ? .caption : .subheadline).foregroundStyle(Studio.muted).lineLimit(1)
+                        Label("歌曲資訊", systemImage: "chevron.up")
+                            .font(.caption).foregroundStyle(Studio.muted)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if spotify.showingActivity || starter.isStarting {
+                        ProgressView().controlSize(.small)
+                    }
+                    artwork(size: artworkSize)
+                }
+                .frame(minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("open-player-details")
+            .accessibilityHint("展開專輯封面、完整歌名與播放資訊")
+            if spotify.connected {
+                PlaybackTimeline(spotify: spotify, starter: starter, trackID: spotify.track?.id)
+                    .id(spotify.track?.id)
+                playbackControls
+                if spotify.requiresReauthorization {
+                    Button("更新 Spotify 授權", action: openSettings).buttonStyle(StudioButton())
+                } else if let message = starter.message {
+                    Text(message).font(.caption).foregroundStyle(Studio.muted).lineLimit(2)
+                }
+            } else {
+                Button("連接 Spotify", action: openSettings).buttonStyle(StudioButton(prominent: true))
+            }
+        }
+        .padding(landscape ? 14 : 18)
+        .background(Studio.surface, in: RoundedRectangle(cornerRadius: 28))
+        .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Studio.ink.opacity(0.07)))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("compact-player")
+    }
+
+    private func artwork(size: CGFloat) -> some View {
+        AsyncImage(url: spotify.track?.artworkURL) { phase in
+            if let image = phase.image { image.resizable().scaledToFit() }
+            else { RecordArtwork() }
+        }
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: size >= 80 ? 20 : 12))
+        .accessibilityLabel(spotify.track.map { "\($0.name) 的專輯封面" } ?? "唱片圖案")
+    }
+
+    private var detailedPlayer: some View {
         VStack(alignment: .leading, spacing: compact ? 8 : 22) {
             HStack {
                 HStack(spacing: 7) {
@@ -37,41 +124,12 @@ struct SpotifyConnectionView: View {
                         .lineLimit(compact ? 1 : nil)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                AsyncImage(url: spotify.track?.artworkURL) { phase in
-                    if let image = phase.image {
-                        image.resizable().scaledToFit()
-                    } else {
-                        RecordArtwork()
-                    }
-                }
-                .frame(width: compact ? 52 : 108, height: compact ? 52 : 108)
-                .clipShape(RoundedRectangle(cornerRadius: 20))
-                .accessibilityLabel(spotify.track.map { "\($0.name) 的專輯封面" } ?? "唱片圖案")
+                artwork(size: 108)
             }
             if spotify.connected {
                 PlaybackTimeline(spotify: spotify, starter: starter, trackID: spotify.track?.id)
                     .id(spotify.track?.id)
-                HStack(spacing: compact ? 4 : 12) {
-                    IconButton(symbol: "arrow.clockwise", label: "更新目前歌曲") { Task { await spotify.refresh() } }
-                    Spacer(minLength: 0)
-                    Button { Task { await spotify.control(.previous) } } label: {
-                        Image(systemName: "backward.end.fill").frame(width: 44, height: 48)
-                            .contentShape(Rectangle())
-                    }.accessibilityLabel("上一首")
-                    Button { Task { await spotify.control(spotify.isPlaying ? .pause : .play) } } label: {
-                        Image(systemName: spotify.isPlaying ? "pause.fill" : "play.fill")
-                            .font(.system(size: 23, weight: .semibold))
-                            .foregroundStyle(Studio.background).frame(width: compact ? 48 : 64, height: compact ? 48 : 64)
-                            .background(Studio.accent, in: Circle())
-                    }.accessibilityLabel(spotify.isPlaying ? "暫停" : "播放")
-                    Button { Task { await spotify.control(.next) } } label: {
-                        Image(systemName: "forward.end.fill").frame(width: 44, height: 48)
-                            .contentShape(Rectangle())
-                    }.accessibilityLabel("下一首")
-                    Spacer(minLength: 0)
-                }
-                .buttonStyle(StudioIconButtonStyle()).foregroundStyle(Studio.ink)
-                .disabled(spotify.busy || starter.isStarting || spotify.requiresReauthorization)
+                playbackControls
                 Text(starter.message ?? spotify.status).font(.caption).foregroundStyle(Studio.muted)
                     .fixedSize(horizontal: false, vertical: true)
                 if spotify.requiresReauthorization {
@@ -102,22 +160,46 @@ struct SpotifyConnectionView: View {
                         spotifyLink
                     }
                     Spacer(minLength: 12)
-                    if spotify.track?.id != nil, let toggleFavorite {
-                        Button(action: toggleFavorite) {
-                            Image(systemName: isFavorite ? "heart.fill" : "heart")
-                                .foregroundStyle(isFavorite ? Studio.accent : Studio.muted)
-                                .frame(width: 44, height: 44)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(isFavorite ? "取消收藏目前歌曲" : "收藏目前歌曲")
-                        .accessibilityIdentifier("favorite-current-song")
-                    }
+                    favoriteButton
                 }
             }
         }
         .padding(compact ? 14 : 24)
         .background(Studio.surface, in: RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Studio.ink.opacity(0.07)))
+    }
+
+    @ViewBuilder
+    private var favoriteButton: some View {
+        if spotify.track?.id != nil, let toggleFavorite {
+            Button(action: toggleFavorite) {
+                Image(systemName: isFavorite ? "heart.fill" : "heart")
+                    .foregroundStyle(isFavorite ? Studio.accent : Studio.muted)
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isFavorite ? "取消收藏目前歌曲" : "收藏目前歌曲")
+            .accessibilityIdentifier("favorite-current-song")
+        }
+    }
+
+    private var playbackControls: some View {
+        ZStack {
+            // The transport stays centered in the card regardless of the side action.
+            PlaybackTransport(spotify: spotify, starter: starter,
+                              buttonSize: compact && landscape ? 48 : 64,
+                              spacing: compact && landscape ? 4 : 18)
+            HStack {
+                if compact {
+                    favoriteButton
+                } else {
+                    IconButton(symbol: "arrow.clockwise", label: "更新目前歌曲") { Task { await spotify.refresh() } }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .buttonStyle(StudioIconButtonStyle()).foregroundStyle(Studio.ink)
+        .disabled(spotify.busy || starter.isStarting || spotify.requiresReauthorization)
     }
 
     private var listeningModePicker: some View {
@@ -155,6 +237,37 @@ struct SpotifyConnectionView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+}
+
+// Shared by the player card and the expanded lyrics view.
+struct PlaybackTransport: View {
+    @ObservedObject var spotify: SpotifyConnection
+    @ObservedObject var starter: SpotifyPlaybackStarter
+    var buttonSize: CGFloat = 64
+    var spacing: CGFloat = 18
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            Button { Task { await spotify.control(.previous) } } label: {
+                Image(systemName: "backward.end.fill").frame(width: 44, height: 48)
+                    .contentShape(Rectangle())
+            }.accessibilityLabel("上一首")
+            Button { Task { await spotify.control(spotify.isPlaying ? .pause : .play) } } label: {
+                Image(systemName: spotify.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 23, weight: .semibold))
+                    .foregroundStyle(Studio.background)
+                    .frame(width: buttonSize, height: buttonSize)
+                    .background(Studio.accent, in: Circle())
+            }.accessibilityLabel(spotify.isPlaying ? "暫停" : "播放")
+            Button { Task { await spotify.control(.next) } } label: {
+                Image(systemName: "forward.end.fill").frame(width: 44, height: 48)
+                    .contentShape(Rectangle())
+            }.accessibilityLabel("下一首")
+        }
+        .frame(maxWidth: .infinity)
+        .buttonStyle(StudioIconButtonStyle()).foregroundStyle(Studio.ink)
+        .disabled(spotify.busy || starter.isStarting || spotify.requiresReauthorization)
     }
 }
 

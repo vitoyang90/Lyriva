@@ -13,6 +13,12 @@ enum LandscapeUITestFixture {
     ], isSynced: true)
 
     static func document(for trackID: String) -> LyricsDocument {
+        let followsPlayback = ProcessInfo.processInfo.arguments.contains("--autofollow-ui-fixture")
+        if followsPlayback || ProcessInfo.processInfo.arguments.contains("--long-lyrics-ui-fixture") {
+            return LyricsDocument(lines: (0..<80).map {
+                .init(id: $0, words: "閱讀第 \($0 + 1) 行歌詞", startTimeMS: Double($0 * (followsPlayback ? 3000 : 10000)))
+            }, isSynced: true)
+        }
         guard trackID == "queue-two" else { return document }
         return LyricsDocument(lines: [.init(id: 0, words: "次の歌も一緒に", startTimeMS: 0)], isSynced: true)
     }
@@ -48,6 +54,7 @@ private struct FixtureSessionStorage: SpotifySessionStorage {
 private final class LandscapePlaybackProtocol: URLProtocol, @unchecked Sendable {
     private static let favoritePlayback = FavoriteFixturePlayback()
     private static let spotifyQueue = SpotifyQueueFixturePlayback()
+    private static let automaticPlaybackStartedAt = Date()
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -57,6 +64,13 @@ private final class LandscapePlaybackProtocol: URLProtocol, @unchecked Sendable 
         let body: Data
         if isDevices {
             body = Data(#"{"devices":[{"id":"fixture-phone","name":"iPhone","is_active":false,"is_restricted":false},{"id":"fixture-computer","name":"Mac","is_active":true,"is_restricted":false}]}"#.utf8)
+        } else if ProcessInfo.processInfo.arguments.contains("--autofollow-ui-fixture") {
+            let position = 30000 + Int(Date().timeIntervalSince(Self.automaticPlaybackStartedAt) * 1000)
+            body = Data("""
+                {"currently_playing_type":"track","is_playing":true,"progress_ms":\(position),
+                 "item":{"id":"landscape-fixture-song","duration_ms":240000,"name":"Automatic Follow Session",
+                 "artists":[{"name":"Lyriva Studio"}],"external_urls":{}}}
+                """.utf8)
         } else if ProcessInfo.processInfo.arguments.contains("--spotify-queue-ui-fixture") {
             body = Self.spotifyQueue.response(to: request)
         } else if ProcessInfo.processInfo.arguments.contains("--favorite-playback-ui-fixture") {

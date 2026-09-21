@@ -2,10 +2,19 @@ import AuthenticationServices
 import CryptoKit
 import SwiftUI
 
+protocol SpotifyAuthenticatingSession: AnyObject {
+    var presentationContextProvider: ASWebAuthenticationPresentationContextProviding? { get set }
+    func start() -> Bool
+}
+
+extension ASWebAuthenticationSession: SpotifyAuthenticatingSession {}
+
 @MainActor
 final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
+    typealias AuthenticationSessionFactory = (URL, String, @escaping (URL?, Error?) -> Void) -> any SpotifyAuthenticatingSession
     @Published private(set) var connected = false
     @Published private(set) var requiresReauthorization = false
+    @Published private(set) var savedSessionUnavailable = false
     @Published private(set) var needsPlaybackDevicePermission = false
     @Published private(set) var playbackDeviceName: String?
     var savedClientID: String { clientID }
@@ -27,7 +36,8 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
     }
 
     let playbackStarter: SpotifyPlaybackStarter
-    private var session: ASWebAuthenticationSession?
+    private var session: (any SpotifyAuthenticatingSession)?
+    private let makeAuthenticationSession: AuthenticationSessionFactory
     private var clientID = ""
     private var retryAfter = Date.distantPast
     private var playbackRevision = UUID()
@@ -59,7 +69,11 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
     private let widgetStorage: WidgetSnapshotStorage
     init(restoreSession: Bool = true, sessionStorage: any SpotifySessionStorage = KeychainSessionStorage(),
          authorization: SpotifyAuthorization = .shared, playbackSession: URLSession = .shared,
-         playbackStarter: SpotifyPlaybackStarter? = nil, widgetStorage: WidgetSnapshotStorage = WidgetSnapshotStorage()) {
+         playbackStarter: SpotifyPlaybackStarter? = nil, widgetStorage: WidgetSnapshotStorage = WidgetSnapshotStorage(),
+         makeAuthenticationSession: @escaping AuthenticationSessionFactory = {
+             ASWebAuthenticationSession(url: $0, callbackURLScheme: $1, completionHandler: $2)
+         }) {
+        self.makeAuthenticationSession = makeAuthenticationSession
         self.restoreSession = restoreSession
         self.sessionStorage = sessionStorage
         self.authorization = authorization
@@ -68,12 +82,12 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         self.playbackStarter = playbackStarter ?? SpotifyPlaybackStarter()
         super.init()
         restoreSavedSession()
-        if restoreSession { _ = try? LyricsCredential.read() }
     }
 
     func restoreSavedSession() {
         guard restoreSession, !connected, !busy else { return }
         do {
+            defer { savedSessionUnavailable = false }
             guard let saved = try sessionStorage.read() else { return }
             clientID = saved.clientID
             connected = true
@@ -82,18 +96,23 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
             PlaybackDiagnostics.record("session restored reauthorization=\(requiresReauthorization) devicePermission=\(!needsPlaybackDevicePermission)")
             status = requiresReauthorization ? AuthorizationError.reauthorizationRequired.localizedDescription : "正在同步…"
         } catch {
+            savedSessionUnavailable = true
             // A temporarily unavailable Keychain must not be mistaken for logout.
             // Retry when the app becomes active again, without deleting the session.
             status = "無法讀取登入資料，回到 App 時會自動重試。"
         }
     }
 
+    func connect() {
+        connect(clientID: SpotifyAppConfiguration.authorizationClientID(
+            saved: connected ? savedClientID : "", configured: SpotifyAppConfiguration.clientID))
+    }
+
     func connect(clientID input: String) {
         PlaybackDiagnostics.record("OAuth requested by user")
         guard !busy else { return }
         let id = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !id.isEmpty else { status = "請輸入 Client ID。"; return }
-        clientID = id
+        guard !id.isEmpty else { status = "此版本暫時無法連接 Spotify，請更新 App 後再試。"; return }
         busy = true
         showingActivity = true
         status = "請完成 Spotify 登入。"
@@ -107,7 +126,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
                           "scope": SpotifyAuthorization.playbackScopes, "state": state,
                           "code_challenge_method": "S256", "code_challenge": challenge]
             .map { URLQueryItem(name: $0.key, value: $0.value) }
-        session = ASWebAuthenticationSession(url: url.url!, callbackURLScheme: "spotifytrans") { [weak self] callback, error in
+        session = makeAuthenticationSession(url.url!, "spotifytrans") { [weak self] callback, error in
             Task { @MainActor in
                 guard let self else { return }
                 defer { self.busy = false; self.showingActivity = false; self.session = nil }
@@ -124,6 +143,8 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
                 }
                 do {
                     try await self.authorization.exchange(code: code, verifier: verifier, clientID: id, redirectURI: Self.redirectURI)
+                    self.clientID = id
+                    self.savedSessionUnavailable = false
                     self.connected = true
                     self.requiresReauthorization = false
                     self.needsPlaybackDevicePermission = false
@@ -503,6 +524,7 @@ final class SpotifyConnection: NSObject, ObservableObject, ASWebAuthenticationPr
         lastPlaybackSync = nil
         retryAfter = .distantPast
         connected = false
+        savedSessionUnavailable = false
         requiresReauthorization = false
         needsPlaybackDevicePermission = false
         playbackDeviceName = nil

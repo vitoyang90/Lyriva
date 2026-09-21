@@ -16,7 +16,15 @@ struct SpotifyWebLogin: View {
         NavigationStack {
             VStack {
                 Text(notice).font(.footnote).padding()
+                #if DEBUG
+                if OnboardingUITestFixture.current != nil {
+                    Text("本機歌詞登入測試").frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    WebLoginContent(webView: webView)
+                }
+                #else
                 WebLoginContent(webView: webView)
+                #endif
             }
             .navigationTitle("啟用歌詞")
             .navigationBarTitleDisplayMode(.inline)
@@ -30,6 +38,14 @@ struct SpotifyWebLogin: View {
     }
 
     private func saveSession() {
+        #if DEBUG
+        if let fixture = OnboardingUITestFixture.current {
+            fixture.saveLyrics()
+            onComplete()
+            dismiss()
+            return
+        }
+        #endif
         checking = true
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
             Task { @MainActor in

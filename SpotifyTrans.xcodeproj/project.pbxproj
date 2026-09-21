@@ -54,6 +54,7 @@
 		AD551FEC305054AC0010F601 /* SpotifyTrans.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SpotifyTrans.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AD551FF9305054AD0010F601 /* SpotifyTransTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpotifyTransTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AD552003305054AD0010F601 /* SpotifyTransUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SpotifyTransUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AE3300000000000000000001 /* Configuration/Spotify.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configuration/Spotify.xcconfig; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -143,6 +144,7 @@
 		AD551FE3305054AC0010F601 = {
 			isa = PBXGroup;
 			children = (
+				AE3300000000000000000001 /* Configuration/Spotify.xcconfig */,
 				AD551FEE305054AC0010F601 /* SpotifyTrans */,
 				AC2200000000000000000004 /* Shared */,
 				AD551FFC305054AD0010F601 /* SpotifyTransTests */,
@@ -567,6 +569,7 @@
 		};
 		AD55200E305054AD0010F601 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AE3300000000000000000001 /* Configuration/Spotify.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -602,6 +605,7 @@
 		};
 		AD55200F305054AD0010F601 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = AE3300000000000000000001 /* Configuration/Spotify.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;

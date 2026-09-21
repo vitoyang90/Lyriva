@@ -6,7 +6,6 @@ struct SpotifyLoginView: View {
     @ObservedObject var lyrics: PhoneLyricsStore
     var onLyricsLogin: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("spotifyClientID") private var clientID = ""
     @State private var loginShown = false
     @State private var lyricsSaved = false
     @State private var credentialUnavailable = false
@@ -32,25 +31,13 @@ struct SpotifyLoginView: View {
                     accountStatus("播放", value: spotify.requiresReauthorization ? "需要重新授權" : (spotify.connected ? "已保存登入" : "尚未設定"))
                     accountStatus("歌詞", value: credentialUnavailable ? "暫時無法讀取" : (lyrics.needsLogin ? "需要更新登入" : (lyricsSaved ? "已保存登入" : "尚未啟用")))
                     if !spotify.connected || spotify.requiresReauthorization {
-                        if !spotify.connected {
-                            TextField("Spotify Client ID", text: $clientID)
-                                .textInputAutocapitalization(.never).autocorrectionDisabled()
-                                .padding(16).background(Studio.background, in: RoundedRectangle(cornerRadius: 14))
-                                .accessibilityLabel("Spotify Client ID")
-                        }
                         Text(spotify.status).font(.caption).foregroundStyle(Studio.muted)
                         Button(spotify.requiresReauthorization ? "重新授權 Spotify" : "連接 Spotify") {
-                            spotify.connect(clientID: spotify.requiresReauthorization ? spotify.savedClientID : clientID)
+                            spotify.connect()
                         }.buttonStyle(StudioButton(prominent: true)).disabled(spotify.busy || signingOut)
-                        if !spotify.connected {
-                            DisclosureGroup("如何取得 Client ID") {
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Text("在 Spotify Developer Dashboard 建立應用程式，複製 Client ID，並加入以下 Redirect URI。")
-                                    Text(SpotifyConnection.redirectURI).textSelection(.enabled).foregroundStyle(Studio.accent)
-                                    Link("開啟 Developer Dashboard ↗", destination: URL(string: "https://developer.spotify.com/dashboard")!)
-                                }.font(.caption).foregroundStyle(Studio.muted).padding(.top, 12)
-                            }
-                        }
+                        #if DEBUG
+                        SpotifyDeveloperSettings()
+                        #endif
                     } else if credentialUnavailable {
                         Button("重試讀取登入資料") { readLyricsLogin() }.buttonStyle(StudioButton())
                     } else if !lyricsSaved || lyrics.needsLogin {

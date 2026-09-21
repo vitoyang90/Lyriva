@@ -1,0 +1,2 @@
+// Public application identifier. Never add a Client Secret to the iOS app.
+SPOTIFY_CLIENT_ID = 0fe0650c347742f2a6740d6ac4297e7b
