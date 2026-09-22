@@ -7,6 +7,7 @@ struct LyricsOptionsView: View {
     @Binding var language: LyricsLanguage
     @Binding var textSize: LyricsTextSize
     @Binding var follow: Bool
+    @Binding var practiceHighlight: PracticeHighlight
     let listeningMode: ListeningMode
     let isSynced: Bool
     let canReload: Bool
@@ -44,10 +45,13 @@ struct LyricsOptionsView: View {
                 .listRowBackground(Studio.raised)
                 if listeningMode == .practice {
                     Section {
-                        LabeledContent("跟唱定位", value: isSynced ? "逐句" : "無時間標記")
-                            .accessibilityIdentifier("practice-line-timing")
+                        Picker("跟唱反白（推估）", selection: $practiceHighlight) {
+                            ForEach(PracticeHighlight.allCases) { Text($0.title).tag($0) }
+                        }
+                        .accessibilityIdentifier("practice-highlight-picker")
+                        .disabled(!isSynced)
                     } footer: {
-                        Text("目前歌詞沒有逐字起訖時間，無法判斷句內停唱與間奏，因此不自動推算逐詞／音節反白。")
+                        Text("逐字進度為推估，每句最多反白 8 秒，再等待下一句，避免長間奏拖慢進度。較長的拖音可能提前停止反白。")
                     }
                     .listRowBackground(Studio.raised)
                 }

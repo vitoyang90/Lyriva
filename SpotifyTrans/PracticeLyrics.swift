@@ -7,10 +7,13 @@ enum PracticeHighlight: String, CaseIterable, Identifiable {
     var title: String { self == .words ? "逐詞" : "逐字／音節" }
 }
 
-// Experimental text subdivision only. The player deliberately does not use this
-// estimate: line timestamps cannot establish vocal activity, pauses, or word ends.
-// Retained for testing tokenization; never enable it as measured karaoke timing.
+// Estimated practice timing, explicitly labeled in the player and options.
+// Line timestamps cannot establish vocal activity, pauses, or word ends.
 struct PracticeLyricsPlan {
+    // A conservative display limit, not a detected vocal ending. Never stretch
+    // the estimate across an entire instrumental gap or the track's outro.
+    static let maximumEstimatedLineDurationMS = 8_000.0
+
     struct Token: Equatable {
         let text: String
         let weight: Double
@@ -42,7 +45,7 @@ struct PracticeLyricsPlan {
         for (index, line) in document.lines.enumerated() {
             guard let start = line.startTimeMS, start.isFinite, start >= 0 else { continue }
             let next = document.lines.dropFirst(index + 1).compactMap(\.startTimeMS).first { $0 > start }
-            let end = min(next ?? durationMS, durationMS)
+            let end = min(next ?? durationMS, durationMS, start + Self.maximumEstimatedLineDurationMS)
             guard end.isFinite, end > start else { continue }
             let paired = Self.pairedTokens(original: line.words, reading: readings[line.id] ?? "",
                                            highlight: highlight, language: language, japanese: japanese)

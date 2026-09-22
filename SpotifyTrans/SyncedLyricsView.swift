@@ -18,6 +18,7 @@ struct SyncedLyricsView: View {
     @AppStorage("lyricsShowChinese") private var showChinese = false
     @AppStorage("lyricsTranslationSourceLanguage") private var translationSourceLanguage = ""
     @State private var follow = true
+    @AppStorage("practiceHighlight") private var practiceHighlight = PracticeHighlight.syllables
     @State private var browsingLyrics = false
     // One scroll position owns both manual reading and centered playback follow.
     // Mixing a top-anchored ID binding with ScrollViewReader can undo recentering.
@@ -101,7 +102,7 @@ struct SyncedLyricsView: View {
                 Text(optionsSummary).font(.caption).foregroundStyle(Studio.muted)
                     .accessibilityIdentifier("lyrics-options-summary")
                 if listeningMode == .practice {
-                    Text(document.isSynced ? "逐句定位 · 缺少逐字時間，暫不提供逐字反白。點歌詞可從該句重唱。" : "此歌曲沒有時間標記，可閱讀練唱，暫不提供反白。")
+                    Text(document.isSynced ? "\(practiceHighlight.title)跟唱（推估）· 點歌詞可從該句重唱。" : "此歌曲沒有時間標記，可閱讀練唱，暫不提供反白。")
                         .font(.caption).foregroundStyle(Studio.muted).accessibilityIdentifier("practice-timing-note")
                 }
                 if !store.message.isEmpty {
@@ -148,7 +149,7 @@ struct SyncedLyricsView: View {
         .sheet(isPresented: $optionsShown) {
             LyricsOptionsView(showOriginal: $showOriginal, showRomanization: $showRomanization,
                               showChinese: $showChinese, language: $language, textSize: textSizeBinding,
-                              follow: $follow,
+                              follow: $follow, practiceHighlight: $practiceHighlight,
                               listeningMode: listeningMode, isSynced: store.document?.isSynced == true,
                               canReload: spotify.track != nil && !store.loading) { revision += 1 }
                 .presentationDetents(landscape ? [.large] : [.height(listeningMode == .practice ? 590 : 530), .large])
@@ -173,10 +174,12 @@ struct SyncedLyricsView: View {
     }
 
     private func lyrics(_ document: LyricsDocument, translations: [Int: String]) -> some View {
-        // Line starts locate a lyric row; the gap until the next row is not a
-        // vocal interval. Never feed that gap into the estimated token animation,
-        // including when an older installation saved a words/syllables preference.
-        return TimelineView(.animation(minimumInterval: 0.25,
+        // Build text subdivisions outside the animation timeline. The UI labels
+        // this estimate explicitly because line timestamps cannot locate vocals.
+        let plan = listeningMode == .practice && store.displayedTrackID == spotify.track?.id
+            ? PracticeLyricsPlan(document: document, readings: store.readings,
+                highlight: practiceHighlight, durationMS: Double(spotify.track?.duration_ms ?? 0), language: language) : nil
+        return TimelineView(.animation(minimumInterval: plan == nil ? 0.25 : 0.05,
                                        paused: scenePhase != .active || !spotify.canPredictPlayback)) { context in
             let position = store.displayedTrackID == spotify.track?.id ? spotify.playbackPosition(at: context.date) : nil
             let active = position.flatMap { document.activeLine(at: $0) }
@@ -184,10 +187,12 @@ struct SyncedLyricsView: View {
                 LazyVStack(alignment: .leading, spacing: landscape ? 6 : 10) {
                     ForEach(document.lines) { line in
                         let issues = store.readingIssues[line.id] ?? []
+                        let practiceLine = plan?.lines[line.id]
                         let row = ReadingLine(original: line.words, reading: store.readings[line.id],
                             translation: translations[line.id], showOriginal: showOriginal || !issues.isEmpty,
                             showReading: showRomanization, active: active == line.id,
-                            size: textSize.points(landscape: landscape), compact: landscape)
+                            size: textSize.points(landscape: landscape), compact: landscape,
+                            practiceLine: practiceLine, practiceProgress: practiceLine?.progress(at: position))
                         VStack(alignment: .leading, spacing: 4) {
                             Group {
                                 if document.isSynced,

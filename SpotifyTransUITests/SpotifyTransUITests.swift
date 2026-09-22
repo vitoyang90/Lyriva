@@ -387,7 +387,7 @@ final class SpotifyTransUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         defer { XCUIDevice.shared.orientation = .portrait }
         let app = XCUIApplication()
-        app.launchArguments = ["--landscape-ui-fixture", "-listeningMode", "normal", "-practiceHighlight", "syllables"]
+        app.launchArguments = ["--landscape-ui-fixture", "-listeningMode", "normal"]
         app.launch()
         let favorite = app.buttons["favorite-current-song"]
         XCTAssertTrue(favorite.waitForExistence(timeout: 8))
@@ -414,20 +414,30 @@ final class SpotifyTransUITests: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(app.otherElements["landscape-player"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["practice-timing-note"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["practice-timing-note"].label.contains("缺少逐字時間"))
-        // A saved syllable setting cannot revive synthetic singing in line-only lyrics.
-        XCTAssertFalse(app.staticTexts["estimated-practice-text"].exists)
+        XCTAssertTrue(app.staticTexts["practice-timing-note"].label.contains("跟唱（推估）"))
+        XCTAssertTrue(app.staticTexts["estimated-practice-text"].firstMatch.exists)
         let practice = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        practice.name = "只有整句時間時的跟唱定位"
+        practice.name = "逐字音節推估跟唱"
         practice.lifetime = .keepAlways
         add(practice)
         app.buttons["open-lyrics-options"].tap()
         XCTAssertTrue(app.navigationBars["歌詞選項"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["practice-highlight-picker"].exists)
-        let timingExplanation = app.staticTexts["目前歌詞沒有逐字起訖時間，無法判斷句內停唱與間奏，因此不自動推算逐詞／音節反白。"]
+        let highlightPicker = app.buttons["practice-highlight-picker"]
+        reveal(highlightPicker, in: app)
+        XCTAssertTrue(highlightPicker.exists)
+        highlightPicker.tap()
+        app.buttons["逐詞"].tap()
+        let timingExplanation = app.staticTexts["逐字進度為推估，每句最多反白 8 秒，再等待下一句，避免長間奏拖慢進度。較長的拖音可能提前停止反白。"]
         reveal(timingExplanation, in: app)
         XCTAssertTrue(timingExplanation.exists)
         closeLyricsOptions(in: app)
+        XCTAssertTrue(app.staticTexts["practice-timing-note"].label.contains("逐詞跟唱（推估）"))
+        app.buttons["open-lyrics-options"].tap()
+        reveal(highlightPicker, in: app)
+        highlightPicker.tap()
+        app.buttons["逐字／音節"].tap()
+        closeLyricsOptions(in: app)
+        XCTAssertTrue(app.staticTexts["practice-timing-note"].label.contains("逐字／音節跟唱（推估）"))
         app.buttons["open-player-details"].tap()
         XCTAssertTrue(app.segmentedControls["listening-mode"].buttons["跟唱"].isSelected)
         closePlayerDetails(in: app)
@@ -437,6 +447,7 @@ final class SpotifyTransUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["收藏歌曲"].waitForNonExistence(timeout: 5))
         XCTAssertTrue(app.buttons["open-favorites"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.staticTexts["practice-timing-note"].exists)
+        XCTAssertFalse(app.staticTexts["estimated-practice-text"].firstMatch.exists)
         XCTAssertFalse(app.buttons["practice-highlight-picker"].exists)
         // An old persisted mode must never enable follow-along at launch.
         app.terminate()

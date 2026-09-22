@@ -108,6 +108,49 @@ struct SongLibraryPracticeTests {
         #expect(!connection.canPredictPlayback)
     }
 
+    @Test(arguments: PracticeHighlight.allCases)
+    func longInstrumentalGapStopsHighlightUntilNextLine(highlight: PracticeHighlight) throws {
+        let document = LyricsDocument(lines: [
+            .init(id: 1, words: "hello world", startTimeMS: 1000),
+            .init(id: 2, words: "sing again", startTimeMS: 61000)
+        ], isSynced: true)
+        let plan = PracticeLyricsPlan(document: document, readings: [1: "hello world"],
+            highlight: highlight, durationMS: 120000, language: .automatic)
+        let first = try #require(plan.lines[1])
+        let next = try #require(plan.lines[2])
+        #expect(first.end == 9000)
+        #expect(first.progress(at: 8999) != nil)
+        for position in [9000.0, 30000, 60999] {
+            #expect(first.progress(at: position) == nil)
+            #expect(PracticeLyricsPlan.activeToken(in: first.original, progress: first.progress(at: position)) == nil)
+            #expect(PracticeLyricsPlan.activeToken(in: first.reading, progress: first.progress(at: position)) == nil)
+            #expect(next.progress(at: position) == nil)
+        }
+        #expect(next.progress(at: 61000) == 0)
+        // Seeking back into a capped line restores its own estimated progress.
+        #expect(first.progress(at: 5000) == 0.5)
+        // The final lyric must also stop before a long outro ends.
+        #expect(next.end == 69000)
+        #expect(next.progress(at: 69000) == nil)
+        #expect(next.progress(at: 119999) == nil)
+    }
+
+    @Test func estimatedLimitStillHonorsEarlierNextLineAndTrackEnd() throws {
+        let document = LyricsDocument(lines: [
+            .init(id: 1, words: "hello world", startTimeMS: 1000),
+            .init(id: 2, words: "sing again", startTimeMS: 4000)
+        ], isSynced: true)
+        let plan = PracticeLyricsPlan(document: document, readings: [:], highlight: .syllables,
+            durationMS: 6000, language: .automatic)
+        let first = try #require(plan.lines[1])
+        let last = try #require(plan.lines[2])
+        #expect(first.end == 4000)
+        #expect(first.progress(at: 2500) == 0.5)
+        #expect(first.progress(at: 4000) == nil)
+        #expect(last.end == 6000)
+        #expect(last.progress(at: 6000) == nil)
+    }
+
     @Test func unsyncedLyricsAndInvalidLastLineDoNotInventTiming() {
         let unsynced = LyricsDocument(lines: [.init(id: 0, words: "hello", startTimeMS: nil)], isSynced: false)
         #expect(PracticeLyricsPlan(document: unsynced, readings: [:], highlight: .syllables, durationMS: 10000, language: .automatic).lines.isEmpty)
