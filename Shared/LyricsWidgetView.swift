@@ -27,7 +27,7 @@ struct LyricsWidgetView: View {
     private var small: Bool { family == .systemSmall }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: family == .systemLarge ? 12 : 4) {
+        VStack(alignment: .leading, spacing: family == .systemLarge ? 12 : (small ? 4 : 2)) {
             if let song = entry.song {
                 HStack(spacing: 10) {
                     artwork(song.artwork)
@@ -43,13 +43,15 @@ struct LyricsWidgetView: View {
                     Text("點一下開啟 App 更新").font(.caption).foregroundStyle(accent)
                     Spacer(minLength: 0)
                 } else {
-                    VStack(alignment: .leading, spacing: 5) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(song.original.flatMap { $0.isEmpty ? nil : $0 } ?? (song.notice ?? (entry.isPredicted ? "♪" : "暫無歌詞")))
-                            .font(.system(size: small ? 15 : 18, weight: .semibold, design: .rounded))
-                            .lineLimit(family == .systemLarge ? 2 : 1).minimumScaleFactor(0.85)
+                            .font(.system(size: small ? 15 : (family == .systemMedium ? 16 : 18), weight: .semibold, design: .rounded))
+                            .lineLimit(family == .systemLarge ? 3 : 2)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .layoutPriority(1)
                         if let reading = song.romanization, !reading.isEmpty {
-                            Text(reading).font(.system(size: small ? 12 : 14, weight: .medium, design: .rounded))
-                                .foregroundStyle(accent).lineLimit(family == .systemLarge ? 2 : 1)
+                            Text(reading).font(.system(size: family == .systemLarge ? 14 : 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(accent).lineLimit(family == .systemLarge ? 3 : 2)
                         }
                     }
                     if family == .systemLarge, let next = song.nextOriginal, !next.isEmpty {

@@ -5,8 +5,10 @@ struct SyncedLyricsView: View {
     @ObservedObject var store: PhoneLyricsStore
     var loginRevision: Int
     @Binding var expanded: Bool
+    var playerExpanded = false
     var landscape = false
     var listeningMode = ListeningMode.normal
+    var readerVisible = true
     var lyricsSetupNeeded = false
     var openSettings: () -> Void
     @State private var revision = 0
@@ -23,7 +25,7 @@ struct SyncedLyricsView: View {
     // One scroll position owns both manual reading and centered playback follow.
     // Mixing a top-anchored ID binding with ScrollViewReader can undo recentering.
     @State private var scrollPosition = ScrollPosition(idType: Int.self)
-    private var shouldFollow: Bool { follow && !browsingLyrics }
+    private var shouldFollow: Bool { readerVisible && follow && !browsingLyrics }
     @AppStorage("lyricsPortraitTextSize") private var portraitTextSize = LyricsTextSize.medium
     @AppStorage("lyricsLandscapeTextSize") private var landscapeTextSize = LyricsTextSize.medium
     private var textSize: LyricsTextSize { landscape ? landscapeTextSize : portraitTextSize }
@@ -46,39 +48,13 @@ struct SyncedLyricsView: View {
             HStack {
                 Text(listeningMode == .practice ? "跟唱歌詞" : "歌詞").font(.title3.bold()).accessibilityIdentifier("lyrics-heading")
                 Spacer()
-                Button { optionsShown = true } label: {
-                    Label("歌詞選項", systemImage: "slider.horizontal.3")
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1).fixedSize()
-                        .padding(.horizontal, 13).frame(minHeight: 44)
-                        .background(Studio.raised, in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("open-lyrics-options")
-                Button {
-                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
-                        expanded.toggle()
-                    }
-                } label: {
-                    ZStack {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            .opacity(expanded ? 0 : 1)
-                        Image(systemName: "arrow.down.right.and.arrow.up.left")
-                            .opacity(expanded ? 1 : 0)
-                    }
-                    .font(.system(size: 17, weight: .medium))
-                    .frame(width: 44, height: 44)
-                    .background(Studio.raised, in: Capsule())
-                    .contentShape(Circle())
-                    .accessibilityHidden(true)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(expanded ? "收合歌詞" : "展開歌詞")
-                .accessibilityIdentifier("toggle-expanded-lyrics")
-                .accessibilityValue(expanded ? "已展開" : "已收合")
+                toolbarControls
+                    .fixedSize()
+                    // Keep both controls at fixed offsets inside one geometry.
+                    // A group containing the flexible Spacer would still let
+                    // their child positions change at different animation rates.
+                    .geometryGroup()
             }
-            // Move the toolbar as one geometry, including both button backgrounds.
-            .geometryGroup()
             if expanded, let track = spotify.track {
                 Text(track.name).font(.subheadline.weight(.medium)).foregroundStyle(Studio.muted)
                     .lineLimit(1).accessibilityIdentifier("expanded-lyrics-track")
@@ -146,6 +122,8 @@ struct SyncedLyricsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .modifier(ReadingScreenAwakeModifier(reading: readerVisible && !lyricsSetupNeeded
+            && store.document?.lines.isEmpty == false && !optionsShown && readingReview == nil))
         .sheet(isPresented: $optionsShown) {
             LyricsOptionsView(showOriginal: $showOriginal, showRomanization: $showRomanization,
                               showChinese: $showChinese, language: $language, textSize: textSizeBinding,
@@ -166,6 +144,42 @@ struct SyncedLyricsView: View {
             await store.load(trackID: spotify.track?.id, language: language, revision: revision, loginRevision: loginRevision)
         }
     }
+    private var toolbarControls: some View {
+        HStack(spacing: 8) {
+            Button { optionsShown = true } label: {
+                Label("歌詞選項", systemImage: "slider.horizontal.3")
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1).fixedSize()
+                    .padding(.horizontal, 13).frame(minHeight: 44)
+                    .background(Studio.raised, in: Capsule())
+            }
+            .buttonStyle(StudioIconButtonStyle())
+            .accessibilityIdentifier("open-lyrics-options")
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.25)) {
+                    expanded.toggle()
+                }
+            } label: {
+                ZStack {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { content in
+                            content.opacity(expanded ? 0 : 1)
+                        }
+                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.15)) { content in
+                            content.opacity(expanded ? 1 : 0)
+                        }
+                }
+                .font(.system(size: 17, weight: .medium))
+                .accessibilityHidden(true)
+            }
+            .buttonStyle(LyricsExpansionButtonStyle())
+            .accessibilityLabel(expanded ? "收合歌詞" : "展開歌詞")
+            .accessibilityIdentifier("toggle-expanded-lyrics")
+            .accessibilityValue(expanded ? "已展開" : "已收合")
+        }
+    }
+
     private var optionsSummary: String {
         [showOriginal ? "原文" : nil, showRomanization ? "羅馬字" : nil,
          showChinese ? "中文" : nil,
@@ -180,11 +194,13 @@ struct SyncedLyricsView: View {
             ? PracticeLyricsPlan(document: document, readings: store.readings,
                 highlight: practiceHighlight, durationMS: Double(spotify.track?.duration_ms ?? 0), language: language) : nil
         return TimelineView(.animation(minimumInterval: plan == nil ? 0.25 : 0.05,
-                                       paused: scenePhase != .active || !spotify.canPredictPlayback)) { context in
+                                       paused: !readerVisible || scenePhase != .active || !spotify.canPredictPlayback)) { context in
             let position = store.displayedTrackID == spotify.track?.id ? spotify.playbackPosition(at: context.date) : nil
             let active = position.flatMap { document.activeLine(at: $0) }
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: landscape ? 6 : 10) {
+                // Lyrics have variable row heights. Keep their measured layout
+                // during player resizing so lazy estimates cannot shift reading.
+                VStack(alignment: .leading, spacing: landscape ? 6 : 10) {
                     ForEach(document.lines) { line in
                         let issues = store.readingIssues[line.id] ?? []
                         let practiceLine = plan?.lines[line.id]
@@ -221,7 +237,10 @@ struct SyncedLyricsView: View {
                     }
                 }.scrollTargetLayout().textSelection(.enabled).padding(.vertical, 12)
             }
-            .scrollPosition($scrollPosition, anchor: .center)
+            // Navigation can resize the covered reader repeatedly. Preserve its
+            // position without feeding hidden layout updates back into view state.
+            .scrollPosition(readerVisible ? $scrollPosition : .constant(scrollPosition), anchor: .center)
+            .defaultScrollAnchor(readerVisible ? (shouldFollow ? .center : .top) : nil, for: .sizeChanges)
             .scrollIndicators(.hidden)
             .accessibilityIdentifier("lyrics-scroll-view")
             .onScrollPhaseChange { _, phase in
@@ -258,6 +277,11 @@ struct SyncedLyricsView: View {
             .onChange(of: expanded) { _, _ in
                 if shouldFollow, let active { scrollPosition.scrollTo(id: active, anchor: .center) }
             }
+            .onChange(of: playerExpanded) { _, _ in
+                if shouldFollow, let active {
+                    scrollPosition.scrollTo(id: active, anchor: .center)
+                }
+            }
             .onChange(of: textSize) { _, _ in
                 if shouldFollow, let active { scrollPosition.scrollTo(id: active, anchor: .center) }
             }
@@ -276,5 +300,16 @@ struct SyncedLyricsView: View {
             .onChange(of: follow) { _, _ in browsingLyrics = false }
             .onAppear { if shouldFollow, let active { scrollPosition.scrollTo(id: active, anchor: .center) } }
         }
+    }
+}
+
+private struct LyricsExpansionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .frame(width: 44, height: 44)
+            // Press feedback affects only the arrow, never the circular fill.
+            .background(Studio.raised, in: Circle())
+            .contentShape(Circle())
     }
 }

@@ -116,8 +116,12 @@ struct WidgetSnapshotTests {
         let now = Date()
         let song = WidgetSongSnapshot(trackID: "preview", title: "範例歌曲", artist: "Lyriva", original: "明日も一緒に歌おう", romanization: "asu mo issho ni utaou", nextOriginal: "世界", nextRomanization: "sekai", updatedAt: now, authorizationID: UUID(), isPlaying: true)
         for (family, width, height) in [(WidgetFamily.systemSmall, 170.0, 170.0), (.systemMedium, 360.0, 170.0), (.systemLarge, 360.0, 376.0)] {
-            for state in ["lyrics", "paused", "empty", "expired"] {
+            for state in ["lyrics", "paused", "long-lyrics", "empty", "expired"] {
                 var displayedSong = song
+                if state == "long-lyrics" {
+                    displayedSong.original = "沿著月光慢慢走，讓今晚的歌聲陪你到遠方，也陪你迎接天亮"
+                    displayedSong.romanization = "yan zhe yue guang man man zou, rang jin wan de ge sheng pei ni dao yuan fang"
+                }
                 if state == "paused" { displayedSong.isPlaying = false }
                 let entry = LyricsWidgetEntry(date: state == "expired" ? now.addingTimeInterval(900) : now, song: state == "empty" ? nil : displayedSong)
                 let view = LyricsWidgetView(entry: entry, familyOverride: family)
@@ -129,7 +133,7 @@ struct WidgetSnapshotTests {
                 let image = try #require(renderer.uiImage?.cgImage)
                 #expect(image.width == Int(width * 2))
                 #expect(image.height == Int(height * 2))
-                if state == "lyrics" || state == "paused" {
+                if state == "lyrics" || state == "paused" || state == "long-lyrics" {
                     let url = FileManager.default.temporaryDirectory.appendingPathComponent("widget-controls-\(family)-\(state).png")
                     try renderer.uiImage?.pngData()?.write(to: url)
                     print("Widget preview: \(url.path)")

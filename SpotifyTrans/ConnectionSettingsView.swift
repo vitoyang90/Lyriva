@@ -121,6 +121,7 @@ struct ConnectionSettingsView: View {
     @ObservedObject var lyrics: PhoneLyricsStore
     var onLyricsLogin: () -> Void
     @State private var loginShown = false
+    @AppStorage(ReadingScreenAwake.preferenceKey) private var keepScreenAwake = false
 
     var body: some View {
         ScrollView {
@@ -141,6 +142,22 @@ struct ConnectionSettingsView: View {
                     settingsRow("翻譯語言", subtitle: "管理本機翻譯與語言下載", symbol: "character.bubble")
                 }
                 .buttonStyle(.plain)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "sun.max")
+                            .foregroundStyle(Studio.accent)
+                            .accessibilityHidden(true)
+                        Toggle("閱讀時保持螢幕亮著", isOn: $keepScreenAwake)
+                            .font(.headline)
+                            .accessibilityIdentifier("keep-screen-awake")
+                    }
+                    Text("閱讀歌詞時暫停自動鎖定，暫停播放也適用。離開歌詞畫面或切到背景後恢復。")
+                        .font(.subheadline).foregroundStyle(Studio.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(20)
+                .background(Studio.surface, in: RoundedRectangle(cornerRadius: 20))
 
                 DisclosureGroup {
                     VStack(alignment: .leading, spacing: 12) {

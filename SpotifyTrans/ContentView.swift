@@ -11,6 +11,7 @@ struct ContentView: View {
         listeningSession.mode(for: spotify.track?.id)
     }
     @State private var lyricsExpanded = false
+    @State private var playerExpanded = false
     @State private var favoritesShown = false
     @State private var settingsShown = false
     @State private var loginShown = false
@@ -68,13 +69,17 @@ struct ContentView: View {
                     : AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
                 layout {
                     if !lyricsExpanded {
-                        playerColumn(compact: landscape, artworkSize: landscape ? 52 : (geometry.size.height < 700 ? 80 : 100))
+                        playerColumn(compact: landscape || geometry.size.height < 700,
+                                     artworkSize: landscape ? 40 : (geometry.size.height < 700 ? 80 : 100))
                             .frame(width: landscape ? min(340, max(260, geometry.size.width * 0.36)) : nil)
                             .fixedSize(horizontal: false, vertical: true)
+                            .geometryGroup()
                             .transition(.opacity)
                     }
                     SyncedLyricsView(spotify: spotify, store: phoneLyrics, loginRevision: loginRevision,
-                                     expanded: $lyricsExpanded, landscape: landscape, listeningMode: listeningMode,
+                                     expanded: $lyricsExpanded, playerExpanded: playerExpanded,
+                                     landscape: landscape, listeningMode: listeningMode,
+                                     readerVisible: !settingsShown && !favoritesShown && !loginShown && !lyricsLoginShown,
                                      lyricsSetupNeeded: onboarding.lyricsAccess == .missing && !phoneLyrics.needsLogin) {
                         lyricsLoginShown = true
                     }
@@ -229,7 +234,8 @@ struct ContentView: View {
                 }.accessibilityLabel("收藏歌曲").accessibilityIdentifier("open-favorites")
                 IconButton(symbol: "slider.horizontal.3", label: "設定") { settingsShown = true }
             }
-            SpotifyConnectionView(spotify: spotify, starter: spotify.playbackStarter, compact: true, landscape: compact, artworkSize: artworkSize,
+            SpotifyConnectionView(spotify: spotify, starter: spotify.playbackStarter, expanded: $playerExpanded,
+                compact: compact, artworkSize: artworkSize,
                 listeningSession: listeningSession, setListeningMode: { mode in
                     listeningSession = .spotify(mode)
                 },

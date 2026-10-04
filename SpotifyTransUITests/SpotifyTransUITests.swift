@@ -42,6 +42,11 @@ final class SpotifyTransUITests: XCTestCase {
         assertCurrentLyricCentered(current, in: lyrics)
         toggle.tap()
         assertCurrentLyricCentered(current, in: lyrics)
+        let playerToggle = app.buttons["toggle-player-details"]
+        playerToggle.tap()
+        assertCurrentLyricCentered(current, in: lyrics)
+        closePlayerDetails(in: app)
+        assertCurrentLyricCentered(current, in: lyrics)
     }
 
     @MainActor
@@ -149,6 +154,33 @@ final class SpotifyTransUITests: XCTestCase {
     }
 
     @MainActor
+    func testRapidExpansionWhileLyricsArePlaying() {
+        // The toolbar stays at the same screen position in landscape, allowing
+        // later taps to interrupt the first transition before it completes.
+        XCUIDevice.shared.orientation = .landscapeLeft
+        defer { XCUIDevice.shared.orientation = .portrait }
+        let app = XCUIApplication()
+        app.launchArguments = ["--landscape-ui-fixture", "--autofollow-ui-fixture",
+                               "--playback-diagnostics", "-lyricsShowChinese", "NO",
+                               "-lyricsShowOriginal", "YES", "-lyricsShowRomanization", "NO"]
+        app.launch()
+        let lyrics = app.scrollViews["lyrics-scroll-view"]
+        XCTAssertTrue(lyrics.waitForExistence(timeout: 10))
+        let toggle = app.buttons["toggle-expanded-lyrics"]
+        for _ in 0..<3 {
+            toggle.tap(withNumberOfTaps: 4, numberOfTouches: 1)
+            XCTAssertEqual(toggle.value as? String, "已收合")
+            XCTAssertTrue(app.otherElements["compact-player"].exists)
+            XCTAssertFalse(app.otherElements["expanded-lyrics-controls"].exists)
+            XCTAssertEqual(app.buttons.matching(identifier: "暫停").count, 1)
+            assertLyricsToolbarAligned(in: app)
+        }
+        let current = lyrics.buttons.matching(NSPredicate(format: "selected == true")).firstMatch
+        assertCurrentLyricCentered(current, in: lyrics)
+        XCTAssertFalse(app.buttons["resume-lyrics-follow"].exists)
+    }
+
+    @MainActor
     private func assertLyricsToolbarAligned(in app: XCUIApplication,
                                             file: StaticString = #filePath, line: UInt = #line) {
         let toggle = app.buttons["toggle-expanded-lyrics"]
@@ -164,7 +196,7 @@ final class SpotifyTransUITests: XCTestCase {
     }
 
     @MainActor
-    func testPortraitLyricsOwnScrollingAndDetailsReturnToSamePosition() {
+    func testPlayerExpandsInlineWithoutReplacingPlaybackOrLyrics() {
         XCUIDevice.shared.orientation = .portrait
         defer { XCUIDevice.shared.orientation = .portrait }
         let app = XCUIApplication()
@@ -172,41 +204,68 @@ final class SpotifyTransUITests: XCTestCase {
                                "-lyricsShowOriginal", "YES", "-lyricsShowRomanization", "YES"]
         app.launch()
         let lyrics = app.scrollViews["lyrics-scroll-view"]
+        let toggle = app.buttons["toggle-player-details"]
+        let timeline = app.sliders["播放進度"]
         XCTAssertTrue(lyrics.waitForExistence(timeout: 10))
-        XCTAssertEqual(app.scrollViews.count, 1)
-        let play = app.buttons["播放"]
         assertCenteredPlayback(in: app)
-        let controlsFrame = play.frame
-        let headingFrame = app.staticTexts["lyrics-heading"].frame
-        XCTAssertTrue(play.isHittable)
-        XCTAssertTrue(app.sliders["播放進度"].isHittable)
-        XCTAssertGreaterThan(lyrics.frame.height, app.frame.height * 0.30)
-        XCTAssertGreaterThan(lyrics.frame.maxY, app.frame.height - 50)
+        let originalHeight = lyrics.frame.height
+        let position = timeline.value as? String
+        let playFrame = app.buttons["播放"].frame
+        XCTAssertGreaterThan(originalHeight, app.frame.height * 0.30)
         lyrics.swipeUp()
-        XCTAssertTrue(app.buttons["resume-lyrics-follow"].waitForExistence(timeout: 5))
-        XCTAssertEqual(play.frame, controlsFrame)
-        XCTAssertEqual(app.staticTexts["lyrics-heading"].frame, headingFrame)
-        let lastLine = app.staticTexts["Hello ありがとう"]
-        XCTAssertTrue(lastLine.isHittable)
-        let lineFrame = lastLine.frame
+        let resume = app.buttons["resume-lyrics-follow"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["播放"].frame, playFrame)
+        let readingLine = app.staticTexts["Hello ありがとう"]
+        XCTAssertTrue(readingLine.isHittable)
+        let readingFrame = readingLine.frame
+
+        for _ in 0..<2 {
+            toggle.tap()
+            XCTAssertEqual(toggle.value as? String, "已展開")
+            XCTAssertTrue(app.otherElements["inline-player-details"].waitForExistence(timeout: 5))
+            XCTAssertFalse(app.sheets.firstMatch.exists)
+            XCTAssertFalse(app.scrollViews["player-scroll-view"].exists)
+            XCTAssertEqual(app.scrollViews.count, 1)
+            XCTAssertFalse(app.navigationBars["歌曲與播放資訊"].exists)
+            XCTAssertEqual(app.sliders.matching(identifier: "播放進度").count, 1)
+            XCTAssertEqual(app.buttons.matching(identifier: "播放").count, 1)
+            XCTAssertTrue(app.staticTexts["playback-device"].exists)
+            XCTAssertEqual(timeline.value as? String, position)
+            XCTAssertTrue(resume.exists)
+            XCTAssertLessThan(lyrics.frame.height, originalHeight)
+            XCTAssertGreaterThan(lyrics.frame.height, 100)
+            let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            screenshot.name = "Inline song and playback details"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            closePlayerDetails(in: app)
+            XCTAssertTrue(resume.exists)
+            XCTAssertEqual(lyrics.frame.height, originalHeight, accuracy: 2)
+            XCTAssertEqual(readingLine.frame.minY, readingFrame.minY, accuracy: 2)
+            assertCenteredPlayback(in: app)
+        }
         let portrait = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        portrait.name = "Portrait lyrics with fixed playback controls"
+        portrait.name = "Collapsed song and playback card"
         portrait.lifetime = .keepAlways
         add(portrait)
-
-        app.buttons["open-player-details"].tap()
-        XCTAssertTrue(app.navigationBars["歌曲與播放資訊"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["playback-device"].exists)
-        let details = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
-        details.name = "Expanded song details"
-        details.lifetime = .keepAlways
-        add(details)
+        toggle.tap()
+        XCUIDevice.shared.orientation = .landscapeLeft
+        XCTAssertTrue(app.otherElements["landscape-player"].waitForExistence(timeout: 5))
+        XCTAssertEqual(toggle.value as? String, "已展開")
+        let modes = app.segmentedControls["listening-mode"]
+        assertPlayerControlVisible(modes, in: app)
+        XCTAssertTrue(modes.isHittable)
+        XCTAssertTrue(app.buttons["player-more-actions"].isHittable)
+        XCTAssertLessThanOrEqual(app.otherElements["compact-player"].frame.maxY, lyrics.frame.maxY)
+        let landscape = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        landscape.name = "Inline playback details in landscape"
+        landscape.lifetime = .keepAlways
+        add(landscape)
         closePlayerDetails(in: app)
-        XCTAssertTrue(play.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["resume-lyrics-follow"].exists)
-        XCTAssertEqual(lastLine.frame.minY, lineFrame.minY, accuracy: 2)
-        XCTAssertEqual(app.scrollViews.count, 1)
-        XCTAssertEqual(play.frame, controlsFrame)
+        XCTAssertTrue(app.buttons["播放"].isHittable)
+        XCTAssertTrue(app.buttons["open-lyrics-options"].isHittable)
+        assertCenteredPlayback(in: app)
     }
 
     @MainActor
@@ -310,7 +369,7 @@ final class SpotifyTransUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Favorite Session"].waitForExistence(timeout: 8))
         XCTAssertTrue(app.buttons["暫停"].waitForExistence(timeout: 5))
         assertCenteredPlayback(in: app)
-        app.buttons["open-player-details"].tap()
+        app.buttons["toggle-player-details"].tap()
         XCTAssertTrue(app.staticTexts["playback-device"].label.contains("Mac"))
         closePlayerDetails(in: app)
         XCTAssertFalse(app.buttons["更新播放裝置權限"].exists)
@@ -329,14 +388,15 @@ final class SpotifyTransUITests: XCTestCase {
         XCUIDevice.shared.orientation = .portrait
         defer { XCUIDevice.shared.orientation = .portrait }
         let app = XCUIApplication()
-        app.launchArguments = ["--landscape-ui-fixture", "--spotify-queue-ui-fixture", "-lyricsShowChinese", "NO"]
+        app.launchArguments = ["--landscape-ui-fixture", "--spotify-queue-ui-fixture", "-lyricsShowChinese", "NO",
+                               "-lyricsShowOriginal", "YES", "-lyricsShowRomanization", "YES"]
         app.launch()
         XCTAssertTrue(app.staticTexts["Spotify Queue 1"].waitForExistence(timeout: 8))
         let modes = app.segmentedControls["listening-mode"]
         let timeline = app.sliders["播放進度"]
         let position = timeline.value as? String
-        app.buttons["open-player-details"].tap()
-        reveal(modes, in: app)
+        app.buttons["toggle-player-details"].tap()
+        assertPlayerControlVisible(modes, in: app)
         XCTAssertTrue(modes.buttons["一般"].isSelected)
         XCTAssertLessThan(modes.buttons["一般"].frame.minX, modes.buttons["跟唱"].frame.minX)
         modes.buttons["跟唱"].tap()
@@ -367,8 +427,8 @@ final class SpotifyTransUITests: XCTestCase {
 
         XCUIDevice.shared.orientation = .portrait
         XCTAssertTrue(app.otherElements["portrait-player"].waitForExistence(timeout: 5))
-        app.buttons["open-player-details"].tap()
-        reveal(modes, in: app)
+        app.buttons["toggle-player-details"].tap()
+        assertPlayerControlVisible(modes, in: app)
         modes.buttons["一般"].tap()
         XCTAssertTrue(modes.buttons["一般"].isSelected)
         closePlayerDetails(in: app)
@@ -438,7 +498,7 @@ final class SpotifyTransUITests: XCTestCase {
         app.buttons["逐字／音節"].tap()
         closeLyricsOptions(in: app)
         XCTAssertTrue(app.staticTexts["practice-timing-note"].label.contains("逐字／音節跟唱（推估）"))
-        app.buttons["open-player-details"].tap()
+        app.buttons["toggle-player-details"].tap()
         XCTAssertTrue(app.segmentedControls["listening-mode"].buttons["跟唱"].isSelected)
         closePlayerDetails(in: app)
         app.buttons["open-favorites"].tap()
@@ -455,7 +515,7 @@ final class SpotifyTransUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.buttons["open-favorites"].waitForExistence(timeout: 8))
         XCTAssertFalse(app.staticTexts["practice-timing-note"].exists)
-        app.buttons["open-player-details"].tap()
+        app.buttons["toggle-player-details"].tap()
         XCTAssertTrue(app.segmentedControls["listening-mode"].buttons["一般"].isSelected)
         closePlayerDetails(in: app)
     }
@@ -561,6 +621,36 @@ final class SpotifyTransUITests: XCTestCase {
         back.tap()
         app.navigationBars["設定"].buttons.firstMatch.tap()
         XCTAssertTrue(app.staticTexts["Landscape Session"].waitForExistence(timeout: 5))
+    }
+
+    @MainActor
+    func testKeepScreenAwakeSettingPersists() {
+        XCUIDevice.shared.orientation = .portrait
+        let app = XCUIApplication()
+        app.launchArguments = ["--landscape-ui-fixture"]
+        app.launch()
+        XCTAssertTrue(app.buttons["設定"].waitForExistence(timeout: 5))
+        app.buttons["設定"].tap()
+        let setting = app.switches["keep-screen-awake"].firstMatch
+        XCTAssertTrue(setting.waitForExistence(timeout: 5))
+        if setting.value as? String == "1" { tapSwitch(setting) }
+        XCTAssertEqual(setting.value as? String, "0")
+        tapSwitch(setting)
+        XCTAssertEqual(setting.value as? String, "1")
+        let screenshot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        screenshot.name = "閱讀時保持螢幕亮著設定"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.navigationBars["設定"].buttons.firstMatch.tap()
+        XCTAssertTrue(app.buttons["播放"].waitForExistence(timeout: 5))
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(app.buttons["設定"].waitForExistence(timeout: 5))
+        app.buttons["設定"].tap()
+        XCTAssertTrue(setting.waitForExistence(timeout: 5))
+        XCTAssertEqual(setting.value as? String, "1")
+        tapSwitch(setting)
+        XCTAssertEqual(setting.value as? String, "0")
     }
 
     @MainActor
@@ -728,8 +818,19 @@ final class SpotifyTransUITests: XCTestCase {
 
     @MainActor
     private func closePlayerDetails(in app: XCUIApplication) {
-        app.buttons["close-player-details"].tap()
-        XCTAssertTrue(app.navigationBars["歌曲與播放資訊"].waitForNonExistence(timeout: 5))
+        let toggle = app.buttons["toggle-player-details"]
+        XCTAssertTrue(toggle.isHittable)
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "已收合")
+        XCTAssertTrue(app.otherElements["inline-player-details"].waitForNonExistence(timeout: 5))
+    }
+
+    @MainActor
+    private func assertPlayerControlVisible(_ element: XCUIElement, in app: XCUIApplication) {
+        XCTAssertFalse(app.scrollViews["player-scroll-view"].exists)
+        XCTAssertTrue(element.isHittable)
+        XCTAssertGreaterThanOrEqual(element.frame.minY, app.frame.minY)
+        XCTAssertLessThanOrEqual(element.frame.maxY, app.frame.maxY)
     }
 
     @MainActor

@@ -1,8 +1,13 @@
 import Foundation
+import OSLog
 
 // Opt-in for a supervised device session. Never pass credentials, callback URLs,
 // HTTP headers, arbitrary response bodies, or lyrics to this logger.
 enum PlaybackDiagnostics {
+    #if DEBUG
+    private static let logger = Logger(subsystem: "order.SpotifyTrans", category: "playback")
+    #endif
+
     static func response(_ data: Data, kind: String) {
         #if DEBUG
         guard ProcessInfo.processInfo.arguments.contains("--playback-diagnostics"),
@@ -34,8 +39,9 @@ enum PlaybackDiagnostics {
         #if DEBUG
         guard ProcessInfo.processInfo.arguments.contains("--playback-diagnostics") else { return }
         let message = event().replacingOccurrences(of: "\n", with: " ")
-        let line = "[LyrivaPlayback] \(Date().ISO8601Format()) \(message)\n"
-        FileHandle.standardOutput.write(Data(line.utf8))
+        // A detached debugger can leave stdout closed. Unified logging does not
+        // depend on that pipe or raise FileHandle's Objective-C write exception.
+        logger.debug("[LyrivaPlayback] \(message, privacy: .private)")
         #endif
     }
 }

@@ -306,12 +306,102 @@ struct LyricsTranslationTests {
         #expect(store.translations.count == 4)
     }
 
-    @Test func mixedLineIsReassembledOnlyAfterBothLanguagesComplete() async {
+    @Test func pitbullCountingRefrainUsesSpanishDespiteHavingFewerThanTwentyLetters() {
+        // Minimal excerpt from the reported song; the remaining fixtures are synthetic.
+        // https://www.shazam.com/song/326894019/i-know-you-want-me-calle-ocho?tab=lyrics
+        let english = "One, two, three, four"
+        let spanish = "Uno, dos, tres, cuatro"
+        let plan = LyricsTranslationPlan(input(texts: [english, spanish, "\(english) \(spanish)"], language: .automatic))
+        #expect(plan.requests.map(\.text) == [english, spanish])
+        #expect(plan.requests.map(\.sourceLanguage) == ["en", "es"])
+        let translations = Dictionary(uniqueKeysWithValues: plan.requests.map { ($0.key, $0.sourceLanguage == "en" ? "英文數字" : "西文數字") })
+        #expect(plan.assembled(using: translations) == [7: "英文數字", 17: "西文數字", 27: "英文數字 西文數字"])
+    }
+
+    @Test func englishSpanishSwitchesSplitAtPhrasesWithoutRequiringPunctuation() {
+        let cases: [(String, [String], [String])] = [
+            ("I love you te quiero", ["I love you", "te quiero"], ["en", "es"]),
+            ("Take my hand, mi amor", ["Take my hand,", "mi amor"], ["en", "es"]),
+            ("Come with me baila conmigo tonight", ["Come with me", "baila conmigo", "tonight"], ["en", "es", "en"]),
+            ("Te quiero, stay with me", ["Te quiero,", "stay with me"], ["es", "en"]),
+            ("Let's sing together, te quiero mucho, stay with me", ["Let's sing together,", "te quiero mucho,", "stay with me"], ["en", "es", "en"])
+        ]
+        for (text, phrases, languages) in cases {
+            let plan = LyricsTranslationPlan(input(texts: [text], language: .automatic))
+            #expect(plan.requests.map(\.text) == phrases)
+            #expect(plan.requests.map(\.sourceLanguage) == languages.map(Optional.some))
+            // Detection must not alter source punctuation, accents or spacing.
+            let unchanged = Dictionary(uniqueKeysWithValues: plan.requests.map { ($0.key, $0.text) })
+            #expect(plan.assembled(using: unchanged) == [7: text])
+        }
+    }
+
+    @Test func spanishPhraseDetectionDoesNotSplitOrdinaryEnglishOrOtherLatinLanguages() {
+        let texts = ["I want you no matter what", "Love me like you do", "I will always be right here beside you",
+                     "Je voudrais voyager avec toi dans le monde entier", "Eu gostaria de viajar com você pelo mundo inteiro"]
+        let plan = LyricsTranslationPlan(input(texts: texts, language: .automatic))
+        #expect(plan.requests.map(\.text) == texts)
+        #expect(plan.requests.map(\.sourceLanguage) == ["en", "en", "en", "fr", "pt"])
+    }
+
+    @Test func spanishShortPhrasesAreNotForcedToEnglishInJapaneseSongs() {
+        let plan = LyricsTranslationPlan(input(texts: ["君と歌う", "Te quiero", "Stay"], language: .automatic))
+        #expect(plan.requests.map(\.sourceLanguage) == ["ja", "es", "en"])
+    }
+
+    @Test func englishSpanishSelectionOnlyRequestsMatchingPhrases() async {
+        for selected in ["en", "es"] {
+            let store = LyricsTranslationStore(availabilityCheck: { code in
+                #expect(code == selected)
+                return .installed
+            })
+            let song = input(texts: ["I love you te quiero"], language: .automatic, sourceLanguage: selected)
+            await store.configure(song, enabled: true)
+            await store.translate(song) { requests in
+                #expect(requests.count == 1)
+                #expect(requests.first?.sourceLanguage == selected)
+                return requests.map { .init(id: $0.id, source: $0.text, text: "我愛你") }
+            }
+            #expect(store.translations == [7: selected == "en" ? "我愛你 te quiero" : "I love you 我愛你"])
+            #expect(store.message == nil)
+        }
+    }
+
+    @Test func missingSpanishModelKeepsEnglishAndResumesOnlySpanish() async {
+        var spanishInstalled = false
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            #expect(["en", "es"].contains(code))
+            return code == "es" && !spanishInstalled ? .supported : .installed
+        }, availabilityRetryDelay: .zero)
+        let song = input(texts: ["I love you te quiero", "I love you te quiero"], language: .automatic)
+        await store.configure(song, enabled: true)
+        await store.translate(song) { requests in
+            #expect(requests.count == 1)
+            #expect(requests.first?.sourceLanguage == "en")
+            return requests.map { .init(id: $0.id, source: $0.text, text: "我愛你") }
+        }
+        #expect(store.translations == [7: "我愛你 te quiero", 17: "我愛你 te quiero"])
+        #expect(store.missingLanguages == ["es"])
+        spanishInstalled = true
+        await store.refreshMissingModels(song)
+        await store.translate(song) { requests in
+            #expect(requests.count == 1)
+            #expect(requests.first?.sourceLanguage == "es")
+            return requests.map { .init(id: $0.id, source: $0.text, text: "我愛你") }
+        }
+        #expect(store.translations == [7: "我愛你 我愛你", 17: "我愛你 我愛你"])
+        #expect(store.message == nil)
+        #expect(store.missingLanguages.isEmpty)
+    }
+
+    @Test func mixedLineShowsCompletedPartsWhileOtherLanguagesArePending() async {
         let store = LyricsTranslationStore()
         let song = input(texts: ["君と I love you いつまでも", "君と I love you いつまでも"], language: .japanese)
         await store.configure(song, enabled: true)
         await store.translate(song) { requests in
-            if requests.first?.sourceLanguage == "en" { #expect(store.translations.isEmpty) }
+            if requests.first?.sourceLanguage == "en" {
+                #expect(store.translations == [7: "與你 I love you 直到永遠", 17: "與你 I love you 直到永遠"])
+            }
             return requests.reversed().map {
                 .init(id: $0.id, source: $0.text, text: ["君と": "與你", "I love you": "我愛你", "いつまでも": "直到永遠"][$0.text]!)
             }
@@ -327,7 +417,7 @@ struct LyricsTranslationTests {
             if requests.first?.sourceLanguage == "ja" { throw URLError(.notConnectedToInternet) }
             return requests.map { .init(id: $0.id, source: $0.text, text: "你好") }
         }
-        #expect(store.translations == [17: "你好"])
+        #expect(store.translations == [17: "你好", 27: "你好 ありがとう"])
         #expect(!store.loading)
         await store.configure(song, enabled: true)
         await store.translate(song) { requests in
@@ -344,6 +434,63 @@ struct LyricsTranslationTests {
         #expect(plan.requests.filter { ["I", "Stay", "Love", "Oh", "Don’t go"].contains($0.text) }.allSatisfy { $0.sourceLanguage == "en" })
         #expect(plan.requests.contains { $0.text == "ハート" && $0.sourceLanguage == "ja" })
         #expect(!plan.groups(excluding: []).contains { $0.source?.languageCode?.identifier == "tr" })
+    }
+
+    @Test func automaticKoreanContextKeepsShortEnglishFragmentsInEnglishBatch() {
+        let english = ["I", "Stay", "Love", "Oh", "Don’t go", "Ｈｅｌｌｏ", "Na na na na na na na na na na na na"]
+        let plan = LyricsTranslationPlan(input(texts: ["너와 함께 노래해"] + english + ["너와 Stay 함께"],
+                                               language: .automatic))
+        #expect(plan.requests.filter { english.contains($0.text) }.count == english.count)
+        #expect(plan.requests.filter { english.contains($0.text) }.allSatisfy { $0.sourceLanguage == "en" })
+        #expect(plan.groups(excluding: []).map { $0.source?.languageCode?.identifier } == ["ko", "en"])
+    }
+
+    @Test func automaticKoreanContextPreservesConfidentOtherLanguages() {
+        let plan = LyricsTranslationPlan(input(texts: ["너와 함께 노래해", "Je voudrais voyager avec toi dans le monde entier"],
+                                               language: .automatic))
+        #expect(plan.requests.last?.sourceLanguage == "fr")
+    }
+
+    @Test func mixedLineKeepsInstalledTranslationsAndResumesMissingLanguage() async {
+        var koreanInstalled = false
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            #expect(["ko", "en", "ja"].contains(code))
+            return code == "ko" && !koreanInstalled ? .supported : .installed
+        }, availabilityRetryDelay: .zero)
+        let song = input(texts: ["Stay 너와 ありがとう", "Stay 너와 ありがとう"], language: .automatic)
+        await store.configure(song, enabled: true)
+        await store.translate(song) { requests in
+            requests.map { .init(id: $0.id, source: $0.text, text: $0.sourceLanguage == "en" ? "留下" : "謝謝") }
+        }
+        #expect(store.translations == [7: "留下 너와 謝謝", 17: "留下 너와 謝謝"])
+        #expect(store.missingLanguages == ["ko"])
+        #expect(!store.loading)
+        koreanInstalled = true
+        await store.refreshMissingModels(song)
+        await store.translate(song) { requests in
+            #expect(requests.count == 1)
+            #expect(requests.first?.sourceLanguage == "ko")
+            return requests.map { .init(id: $0.id, source: $0.text, text: "與你") }
+        }
+        #expect(store.translations == [7: "留下 與你 謝謝", 17: "留下 與你 謝謝"])
+        #expect(store.missingLanguages.isEmpty)
+        #expect(store.message == nil)
+    }
+
+    @Test func unknownFragmentKeepsOriginalTextWithoutHidingTranslatedParts() async {
+        let store = LyricsTranslationStore(availabilityCheck: { code in
+            #expect(code == "ja")
+            return .installed
+        })
+        let song = input(texts: ["ありがとう  Ж  ありがとう", "Ж"], language: .automatic)
+        await store.configure(song, enabled: true)
+        await store.translate(song) { requests in
+            #expect(requests.count == 1)
+            return requests.map { .init(id: $0.id, source: $0.text, text: "謝謝") }
+        }
+        #expect(store.translations == [7: "謝謝  Ж  謝謝"])
+        #expect(store.message?.contains("語言無法確認") == true)
+        #expect(!store.loading)
     }
 
     @Test func uncertainLongLatinFragmentsUseSongContextWithoutOverridingConfidentLanguages() {

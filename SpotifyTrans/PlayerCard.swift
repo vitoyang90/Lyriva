@@ -1,10 +1,14 @@
 import SwiftUI
 
+enum PlayerExpansionMotion {
+    static let animation = Animation.smooth(duration: 0.32, extraBounce: 0)
+}
+
 struct SpotifyConnectionView: View {
     @ObservedObject var spotify: SpotifyConnection
     @ObservedObject var starter: SpotifyPlaybackStarter
+    @Binding var expanded: Bool
     var compact = false
-    var landscape = false
     var artworkSize: CGFloat = 100
     var listeningSession = ListeningSession.spotify(.normal)
     var setListeningMode: ((ListeningMode) -> Void)? = nil
@@ -12,81 +16,136 @@ struct SpotifyConnectionView: View {
     var toggleFavorite: (() -> Void)? = nil
     var openSettings: () -> Void
     @Environment(\.openURL) private var openURL
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var spotifyUnavailable = false
-    @State private var detailsShown = false
 
     var body: some View {
-        Group {
-            if compact { compactPlayer } else { detailedPlayer }
-        }
-        .sheet(isPresented: $detailsShown) {
-            NavigationStack {
-                ScrollView {
-                    SpotifyConnectionView(spotify: spotify, starter: starter,
-                        listeningSession: listeningSession, setListeningMode: setListeningMode,
-                        isFavorite: isFavorite, toggleFavorite: toggleFavorite) {
-                            detailsShown = false
-                            openSettings()
-                        }
-                        .padding(18)
-                }
-                .background(Studio.background.ignoresSafeArea())
-                .navigationTitle("歌曲與播放資訊")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("完成") { detailsShown = false }
-                            .accessibilityIdentifier("close-player-details")
-                    }
-                }
-            }
-            .presentationDetents([.large])
-            .presentationDragIndicator(.visible)
-        }
-    }
-
-    private var compactPlayer: some View {
-        VStack(spacing: landscape ? 8 : 12) {
-            Button { detailsShown = true } label: {
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: landscape ? 4 : 8) {
-                        Text(spotify.track?.name ?? (spotify.connected ? "尚未播放" : "連接 Spotify"))
-                            .font(.system(landscape ? .headline : .title2, design: .rounded, weight: .bold))
-                            .foregroundStyle(Studio.ink).lineLimit(2)
-                        Text(spotify.track?.artists.map(\.name).joined(separator: " · ") ?? "播放歌曲後顯示歌詞")
-                            .font(landscape ? .caption : .subheadline).foregroundStyle(Studio.muted).lineLimit(1)
-                        Label("歌曲資訊", systemImage: "chevron.up")
-                            .font(.caption).foregroundStyle(Studio.muted)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    if spotify.showingActivity || starter.isStarting {
-                        ProgressView().controlSize(.small)
-                    }
-                    artwork(size: artworkSize)
-                }
-                .frame(minHeight: 44).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("open-player-details")
-            .accessibilityHint("展開專輯封面、完整歌名與播放資訊")
+        VStack(alignment: .leading, spacing: compact ? 8 : 12) {
+            songHeader
             if spotify.connected {
                 PlaybackTimeline(spotify: spotify, starter: starter, trackID: spotify.track?.id)
                     .id(spotify.track?.id)
                 playbackControls
                 if spotify.requiresReauthorization {
                     Button("更新 Spotify 授權", action: openSettings).buttonStyle(StudioButton())
-                } else if let message = starter.message {
-                    Text(message).font(.caption).foregroundStyle(Studio.muted).lineLimit(2)
+                } else if let message = playbackMessage {
+                    Text(message).font(.caption).foregroundStyle(Studio.muted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 Button("連接 Spotify", action: openSettings).buttonStyle(StudioButton(prominent: true))
             }
+            if expanded, spotify.connected {
+                playbackDetails
+                    .transition(.opacity)
+            }
         }
-        .padding(landscape ? 14 : 18)
+        .padding(compact ? 14 : 18)
         .background(Studio.surface, in: RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Studio.ink.opacity(0.07)))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("compact-player")
+    }
+
+    private var songHeader: some View {
+        let artworkFootprint = artworkSize + 12
+        return Button {
+            withAnimation(reduceMotion ? nil : PlayerExpansionMotion.animation) {
+                expanded.toggle()
+            }
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: compact ? 4 : 8) {
+                    Text(spotify.track?.name ?? (spotify.connected ? "尚未播放" : "連接 Spotify"))
+                        .font(.system(compact ? .headline : .title2, design: .rounded, weight: .bold))
+                        .foregroundStyle(Studio.ink)
+                        .lineLimit(expanded ? nil : 2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(spotify.track?.artists.map(\.name).joined(separator: " · ") ?? "播放歌曲後顯示歌詞")
+                        .font(compact ? .caption : .subheadline).foregroundStyle(Studio.muted)
+                        .lineLimit(expanded ? nil : 1)
+                    Label {
+                        Text(expanded ? "收合歌曲與播放" : "展開歌曲與播放")
+                    } icon: {
+                        Image(systemName: "chevron.down")
+                            .rotationEffect(.degrees(expanded ? 180 : 0))
+                    }
+                    .font(.caption).foregroundStyle(Studio.accent)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // Reserve a stable text width so scaling the cover does not
+                // repeatedly reflow the song title during the animation.
+                artwork(size: artworkFootprint)
+                    .scaleEffect(expanded ? 1 : artworkSize / artworkFootprint, anchor: .trailing)
+                    .overlay(alignment: .bottomTrailing) {
+                        if spotify.showingActivity || starter.isStarting {
+                            ProgressView().controlSize(.small).padding(6)
+                                .background(Studio.surface, in: Circle())
+                        }
+                    }
+            }
+            .frame(minHeight: 44).contentShape(Rectangle())
+            .geometryGroup()
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("toggle-player-details")
+        .accessibilityValue(expanded ? "已展開" : "已收合")
+        .accessibilityHint(expanded ? "縮小歌曲區域，讓歌詞顯示更多內容" : "在目前畫面顯示完整歌名、播放模式與裝置資訊")
+    }
+
+    private var playbackDetails: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Rectangle().fill(Studio.ink.opacity(0.08)).frame(height: 1)
+            if compact {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if setListeningMode != nil { listeningModePicker }
+                        playbackDevice
+                    }
+                    Menu {
+                        Button("切換至 Spotify", systemImage: "arrow.up.right", action: switchToSpotify)
+                        if spotify.needsPlaybackDevicePermission && !spotify.requiresReauthorization {
+                            Button("更新播放裝置權限") { spotify.connect(clientID: spotify.savedClientID) }
+                                .disabled(spotify.busy)
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel("更多播放操作")
+                    .accessibilityIdentifier("player-more-actions")
+                }
+                if spotifyUnavailable { spotifyUnavailableMessage }
+            } else {
+                if setListeningMode != nil { listeningModePicker }
+                playbackDevice
+                HStack(spacing: 12) {
+                    spotifyLink
+                    Spacer(minLength: 0)
+                    if spotify.needsPlaybackDevicePermission && !spotify.requiresReauthorization {
+                        Button("更新裝置權限") { spotify.connect(clientID: spotify.savedClientID) }
+                            .font(.caption).frame(minHeight: 44).disabled(spotify.busy)
+                            .accessibilityLabel("更新播放裝置權限")
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("inline-player-details")
+    }
+
+    private var playbackDevice: some View {
+        Text("播放裝置：\(spotify.playbackDeviceName ?? "沿用 Spotify 目前裝置")")
+            .font(compact ? .caption2 : .caption).foregroundStyle(Studio.muted)
+            .lineLimit(compact ? 1 : nil)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityIdentifier("playback-device")
+    }
+
+    private var playbackMessage: String? {
+        if let message = starter.message { return message }
+        let routineStatuses = ["播放中", "已暫停", "尚未播放", "已連接 Spotify", "正在同步…"]
+        return routineStatuses.contains(spotify.status) ? nil : spotify.status
     }
 
     private func artwork(size: CGFloat) -> some View {
@@ -99,107 +158,32 @@ struct SpotifyConnectionView: View {
         .accessibilityLabel(spotify.track.map { "\($0.name) 的專輯封面" } ?? "唱片圖案")
     }
 
-    private var detailedPlayer: some View {
-        VStack(alignment: .leading, spacing: compact ? 8 : 22) {
-            HStack {
-                HStack(spacing: 7) {
-                    Circle().fill(spotify.connected ? Studio.accent : Studio.muted).frame(width: 6, height: 6)
-                    Text(spotify.requiresReauthorization ? "需要重新授權" : (spotify.connected ? "已連接 Spotify" : "Spotify"))
-                        .font(.caption.weight(.medium))
-                }.foregroundStyle(Studio.muted)
-                Spacer()
-                ProgressView().tint(Studio.accent).scaleEffect(0.8)
-                    .frame(width: 20, height: 20)
-                    .opacity((spotify.showingActivity || starter.isStarting) ? 1 : 0)
-                    .accessibilityHidden(!spotify.showingActivity && !starter.isStarting)
-            }
-            HStack(alignment: .center, spacing: compact ? 12 : 20) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(spotify.track?.name ?? (spotify.connected ? "尚未播放" : "連接 Spotify"))
-                        .font(.system(compact ? .headline : .title2, design: .rounded, weight: .bold))
-                        .lineLimit(compact ? 2 : nil)
-                        .foregroundStyle(Studio.ink).fixedSize(horizontal: false, vertical: true)
-                    Text(spotify.track?.artists.map(\.name).joined(separator: " · ") ?? (spotify.connected ? "播放歌曲後顯示歌詞" : "查看目前歌曲與羅馬字歌詞"))
-                        .font(compact ? .caption : .subheadline).foregroundStyle(Studio.muted).lineSpacing(4)
-                        .lineLimit(compact ? 1 : nil)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                artwork(size: 108)
-            }
-            if spotify.connected {
-                PlaybackTimeline(spotify: spotify, starter: starter, trackID: spotify.track?.id)
-                    .id(spotify.track?.id)
-                playbackControls
-                Text(starter.message ?? spotify.status).font(.caption).foregroundStyle(Studio.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                if spotify.requiresReauthorization {
-                    Button("更新 Spotify 授權", action: openSettings).buttonStyle(StudioButton())
-                }
-                Text("播放裝置：\(spotify.playbackDeviceName ?? "沿用 Spotify 目前裝置")")
-                    .font(.caption).foregroundStyle(Studio.muted)
-                    .accessibilityIdentifier("playback-device")
-                if spotify.needsPlaybackDevicePermission && !spotify.requiresReauthorization {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Button("更新播放裝置權限") { spotify.connect(clientID: spotify.savedClientID) }
-                            .disabled(spotify.busy)
-                        Text("只需更新一次，即可辨識手機或電腦；切歌沿用已保存的授權。")
-                            .font(.caption).foregroundStyle(Studio.muted)
-                    }
-                }
-                if setListeningMode != nil {
-                    listeningModePicker
-                }
-            } else {
-                Button(action: openSettings) {
-                    HStack { Text("連接 Spotify"); Spacer(); Image(systemName: "arrow.up.right") }
-                }.buttonStyle(StudioButton(prominent: true))
-            }
-            if spotify.connected || spotify.track?.id != nil {
-                HStack(alignment: .center) {
-                    if spotify.connected {
-                        spotifyLink
-                    }
-                    Spacer(minLength: 12)
-                    favoriteButton
-                }
-            }
-        }
-        .padding(compact ? 14 : 24)
-        .background(Studio.surface, in: RoundedRectangle(cornerRadius: 28))
-        .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(Studio.ink.opacity(0.07)))
-    }
-
-    @ViewBuilder
-    private var favoriteButton: some View {
-        if spotify.track?.id != nil, let toggleFavorite {
-            Button(action: toggleFavorite) {
-                Image(systemName: isFavorite ? "heart.fill" : "heart")
-                    .foregroundStyle(isFavorite ? Studio.accent : Studio.muted)
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(isFavorite ? "取消收藏目前歌曲" : "收藏目前歌曲")
-            .accessibilityIdentifier("favorite-current-song")
-        }
-    }
-
     private var playbackControls: some View {
-        ZStack {
-            // The transport stays centered in the card regardless of the side action.
-            PlaybackTransport(spotify: spotify, starter: starter,
-                              buttonSize: compact && landscape ? 48 : 64,
-                              spacing: compact && landscape ? 4 : 18)
-            HStack {
-                if compact {
-                    favoriteButton
-                } else {
-                    IconButton(symbol: "arrow.clockwise", label: "更新目前歌曲") { Task { await spotify.refresh() } }
-                }
-                Spacer(minLength: 0)
+        // Equal side slots keep the transport centered without overlaying its
+        // hit targets on narrower screens. Only transport actions wait for sync.
+        HStack(spacing: 0) {
+            Group {
+                if spotify.track?.id != nil, let toggleFavorite {
+                    Button(action: toggleFavorite) {
+                        Image(systemName: isFavorite ? "heart.fill" : "heart")
+                            .foregroundStyle(isFavorite ? Studio.accent : Studio.muted)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel(isFavorite ? "取消收藏目前歌曲" : "收藏目前歌曲")
+                    .accessibilityIdentifier("favorite-current-song")
+                } else { Color.clear.frame(width: 44, height: 44).accessibilityHidden(true) }
             }
+            PlaybackTransport(spotify: spotify, starter: starter,
+                              buttonSize: compact ? 48 : 64, spacing: compact ? 4 : 18)
+            Button { Task { await spotify.refresh() } } label: {
+                Image(systemName: "arrow.clockwise").frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .accessibilityLabel("更新目前歌曲")
+            .disabled(spotify.busy || starter.isStarting || spotify.requiresReauthorization)
         }
         .buttonStyle(StudioIconButtonStyle()).foregroundStyle(Studio.ink)
-        .disabled(spotify.busy || starter.isStarting || spotify.requiresReauthorization)
     }
 
     private var listeningModePicker: some View {
@@ -218,24 +202,26 @@ struct SpotifyConnectionView: View {
 
     private var spotifyLink: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button {
-                // Switch apps without opening a track or sending a playback command.
-                // Spotify retains control of its current screen and playback context.
-                spotifyUnavailable = false
-                openURL(URL(string: "spotify://")!) { accepted in
-                    spotifyUnavailable = !accepted
-                }
-            } label: {
-                Label("切換至 Spotify", systemImage: "arrow.up.right").font(.caption.weight(.medium))
+            Button(action: switchToSpotify) {
+                Label("切換至 Spotify", systemImage: "arrow.up.right")
+                    .font(.caption.weight(.medium)).frame(minHeight: 44)
             }
             .foregroundStyle(Studio.accent)
             .accessibilityHint("返回 Spotify，保留目前播放列表與佇列")
-            if spotifyUnavailable {
-                Text("無法開啟 Spotify，請確認此裝置已安裝 Spotify。")
-                    .font(.caption)
-                    .foregroundStyle(Studio.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            if spotifyUnavailable { spotifyUnavailableMessage }
+        }
+    }
+
+    private var spotifyUnavailableMessage: some View {
+        Text("無法開啟 Spotify，請確認此裝置已安裝 Spotify。")
+            .font(.caption).foregroundStyle(Studio.muted)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func switchToSpotify() {
+        spotifyUnavailable = false
+        openURL(URL(string: "spotify://")!) { accepted in
+            spotifyUnavailable = !accepted
         }
     }
 }
