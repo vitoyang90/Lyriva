@@ -3,6 +3,37 @@ import Translation
 
 enum TranslationModels {
     static let target = Locale.Language(identifier: "zh-Hant")
+
+    // Availability, downloads and execution must use the same strategy. Checking
+    // only the traditional models can hide already available Intelligence models.
+    static func availability() -> LanguageAvailability {
+        if #available(iOS 26.4, *) {
+            return LanguageAvailability(preferredStrategy: .highFidelity)
+        }
+        return LanguageAvailability()
+    }
+
+    static func configuration(source: Locale.Language?, target: Locale.Language = target) -> TranslationSession.Configuration {
+        if #available(iOS 26.4, *) {
+            return TranslationSession.Configuration(source: source, target: target, preferredStrategy: .highFidelity)
+        }
+        return TranslationSession.Configuration(source: source, target: target)
+    }
+
+    @available(iOS 26.0, *)
+    static func installedSession(source: Locale.Language) -> TranslationSession {
+        if #available(iOS 26.4, *) {
+            return TranslationSession(installedSource: source, target: target, preferredStrategy: .highFidelity)
+        }
+        return TranslationSession(installedSource: source, target: target)
+    }
+
+    static var qualityDescription: String {
+        if #available(iOS 26.4, *) {
+            return "優先使用較自然的翻譯。裝置支援且已啟用 Apple Intelligence 時，使用其翻譯模型；否則由系統使用一般翻譯。歌詞隱喻與省略語意仍可能有誤。"
+        }
+        return "目前使用一般裝置端翻譯。iOS 26.4 以上且已啟用 Apple Intelligence 的支援裝置，可使用較自然的翻譯。"
+    }
     static func name(_ code: String) -> String {
         switch code {
         case "ja": return "日文"
@@ -24,7 +55,7 @@ enum TranslationModels {
             return languageCodes(from: ["ja", "en", "ko", "fr", "de", "es"].map { Locale.Language(identifier: $0) })
         }
         #endif
-        return languageCodes(from: await LanguageAvailability().supportedLanguages)
+        return languageCodes(from: await availability().supportedLanguages)
     }
     static func status(_ code: String) async -> LanguageAvailability.Status {
         #if DEBUG
@@ -35,7 +66,7 @@ enum TranslationModels {
         #if targetEnvironment(simulator)
         return .unsupported
         #else
-        return await LanguageAvailability().status(from: Locale.Language(identifier: code), to: target)
+        return await availability().status(from: Locale.Language(identifier: code), to: target)
         #endif
     }
 
@@ -128,7 +159,10 @@ struct TranslationLanguagesView: View {
                     Text("只翻指定語言時，其他語言保留原文；同一句混合語言也只翻譯符合的片段。")
                         .font(.caption).foregroundStyle(Studio.muted)
                 }.padding(22).background(Studio.surface, in: RoundedRectangle(cornerRadius: 24))
-                Text("選擇需要的語言，下載後即可在本機翻譯。")
+                Text(TranslationModels.qualityDescription)
+                    .font(.subheadline).foregroundStyle(Studio.muted)
+                    .accessibilityIdentifier("translation-quality-description")
+                Text("以下列出此裝置可用的語言，需要下載時可手動下載。")
                     .font(.subheadline).foregroundStyle(Studio.muted)
                 if loading { ProgressView("檢查可用語言…") }
                 if !loading, displayedLanguages.isEmpty {
@@ -281,7 +315,7 @@ private struct TranslationLanguageCard: View {
                     generation = UUID()
                     message = nil
                     downloading = true
-                    configuration = TranslationSession.Configuration(source: Locale.Language(identifier: code), target: TranslationModels.target)
+                    configuration = TranslationModels.configuration(source: Locale.Language(identifier: code))
                 }.buttonStyle(StudioButton(prominent: true))
             }
         }

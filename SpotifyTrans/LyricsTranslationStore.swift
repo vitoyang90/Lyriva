@@ -144,7 +144,7 @@ final class LyricsTranslationStore: ObservableObject {
     private func activate(_ group: LyricsTranslationPlan.Group, target: Locale.Language = TranslationModels.target) {
         // Publish only after availability checks finish. Clearing configuration
         // while awaiting would cancel the translation task performing the check.
-        var next = lastConfiguration ?? TranslationSession.Configuration(source: group.source, target: target)
+        var next = lastConfiguration ?? TranslationModels.configuration(source: group.source, target: target)
         next.source = group.source
         next.target = target
         next.invalidate()
@@ -194,7 +194,7 @@ final class LyricsTranslationStore: ObservableObject {
         await process(group, generation: id) { requests in
             let activeSession: TranslationSession
             if #available(iOS 26.0, *) {
-                activeSession = TranslationSession(installedSource: source, target: TranslationModels.target)
+                activeSession = TranslationModels.installedSession(source: source)
             } else {
                 activeSession = session
             }

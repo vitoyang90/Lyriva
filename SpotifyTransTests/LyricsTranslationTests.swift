@@ -6,6 +6,47 @@ import NaturalLanguage
 
 @MainActor
 struct LyricsTranslationTests {
+    @Test func qualityStrategyIsConsistentAcrossAvailabilityAndDownloadConfiguration() {
+        let source = Locale.Language(identifier: "ja")
+        let configuration = TranslationModels.configuration(source: source)
+        #expect(configuration.source == source)
+        #expect(configuration.target == TranslationModels.target)
+        if #available(iOS 26.4, *) {
+            #expect(TranslationModels.availability().preferredStrategy == .highFidelity)
+            #expect(configuration.preferredStrategy == .highFidelity)
+        }
+    }
+
+    @Test func qualityStrategySurvivesLanguageChangesAndRetryWithoutLosingCompletedLyrics() async {
+        let store = LyricsTranslationStore(availabilityCheck: { _ in .installed })
+        let song = input(texts: ["君と歌う", "Hello world"], language: .automatic)
+        await store.configure(song, enabled: true)
+        #expect(store.configuration?.source?.languageCode?.identifier == "ja")
+        if #available(iOS 26.4, *) {
+            #expect(store.configuration?.preferredStrategy == .highFidelity)
+        }
+        var configurations: [TranslationSession.Configuration] = []
+        await store.translate(song) { requests in
+            if let configuration = store.configuration { configurations.append(configuration) }
+            if requests.first?.sourceLanguage == "en" { throw URLError(.timedOut) }
+            return requests.map { .init(id: $0.id, source: $0.text, text: "與你歌唱") }
+        }
+        #expect(configurations.compactMap { $0.source?.languageCode?.identifier } == ["ja", "en"])
+        #expect(store.translations == [7: "與你歌唱"])
+        await store.configure(song, enabled: true)
+        #expect(store.configuration?.source?.languageCode?.identifier == "en")
+        if let configuration = store.configuration { configurations.append(configuration) }
+        if #available(iOS 26.4, *) {
+            #expect(configurations.allSatisfy { $0.preferredStrategy == .highFidelity })
+        }
+        await store.translate(song) { requests in
+            #expect(requests.map(\.text) == ["Hello world"])
+            return requests.map { .init(id: $0.id, source: $0.text, text: "你好，世界") }
+        }
+        #expect(store.translations == [7: "與你歌唱", 17: "你好，世界"])
+        #expect(store.message == nil)
+    }
+
     @Test func downloadedModelsSortBeforeMissingAndUnsupportedModels() {
         let codes = ["fr", "ko", "ja", "en"]
         let statuses: [String: LanguageAvailability.Status] = ["fr": .supported, "ko": .unsupported, "ja": .installed, "en": .installed]
